@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
+import { constants, createReadStream, type Dirent } from "node:fs";
 import {
 	access,
 	appendFile,
@@ -23,6 +23,8 @@ import {
 	FileError,
 	type FileInfo,
 	type FileKind,
+	type FuzzySearchFileEntry,
+	type FuzzySearchFilesOptions,
 	ok,
 	type Result,
 	toError,
@@ -97,6 +99,14 @@ async function pathExists(path: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+function shouldExcludePath(name: string, exclude: string[]): boolean {
+	return exclude.includes(name);
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 async function runCommand(
@@ -464,6 +474,140 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		} catch (error) {
 			return err(toFileError(error, resolved));
 		}
+	}
+
+	async fuzzySearchFiles(options?: FuzzySearchFilesOptions): Promise<Result<FuzzySearchFileEntry[], FileError>> {
+		const baseDir = resolvePath(this.cwd, options?.baseDir ?? this.cwd);
+		const maxResults = options?.maxResults ?? 100;
+		const includeHidden = options?.includeHidden ?? true;
+		const followSymlinks = options?.followSymlinks ?? true;
+		const exclude = options?.exclude ?? [".git"];
+		const query = (options?.query ?? "").toLowerCase();
+		const aborted = abortResult<FuzzySearchFileEntry[]>(options?.abortSignal, baseDir);
+		if (aborted) return aborted;
+
+		const gitEntries = await this.fuzzySearchGitFiles(baseDir, {
+			query,
+			maxResults,
+			includeHidden,
+			followSymlinks,
+			abortSignal: options?.abortSignal,
+		});
+		if (gitEntries) return gitEntries;
+
+		const results: FuzzySearchFileEntry[] = [];
+		const queue: string[] = [baseDir];
+
+		while (queue.length > 0 && results.length < maxResults) {
+			const currentDir = queue.shift()!;
+			const loopAbort = abortResult<FuzzySearchFileEntry[]>(options?.abortSignal, currentDir);
+			if (loopAbort) return loopAbort;
+
+			let entries: Dirent[];
+			try {
+				entries = await readdir(currentDir, { withFileTypes: true });
+			} catch (error) {
+				return err(toFileError(error, currentDir));
+			}
+
+			for (const entry of entries) {
+				const entryAbort = abortResult<FuzzySearchFileEntry[]>(options?.abortSignal, currentDir);
+				if (entryAbort) return entryAbort;
+				if (shouldExcludePath(entry.name, exclude)) continue;
+				if (!includeHidden && entry.name.startsWith(".")) continue;
+
+				const entryPath = resolve(currentDir, entry.name);
+				let kind = fileKindFromStats(entry);
+				let isDirectory = kind === "directory";
+				if (kind === "symlink" && followSymlinks) {
+					try {
+						const stats = await lstat(entryPath);
+						kind = fileKindFromStats(stats);
+						isDirectory = kind === "directory";
+					} catch {
+						// Broken or inaccessible symlink; keep the symlink entry.
+					}
+					if (!isDirectory) {
+						try {
+							const listed = await readdir(entryPath);
+							isDirectory = Array.isArray(listed);
+							kind = isDirectory ? "directory" : kind;
+						} catch {
+							// Not a directory symlink.
+						}
+					}
+				}
+				if (!kind) continue;
+
+				const relativePath = entryPath.slice(baseDir.replace(/\/+$/, "").length + 1).replace(/\\/g, "/");
+				if (!query || relativePath.toLowerCase().includes(query) || entry.name.toLowerCase().includes(query)) {
+					results.push({
+						path: isDirectory ? `${relativePath}/` : relativePath,
+						kind: isDirectory ? "directory" : kind,
+					});
+					if (results.length >= maxResults) break;
+				}
+				if (isDirectory) queue.push(entryPath);
+			}
+		}
+
+		return ok(results);
+	}
+
+	private async fuzzySearchGitFiles(
+		baseDir: string,
+		options: {
+			query: string;
+			maxResults: number;
+			includeHidden: boolean;
+			followSymlinks: boolean;
+			abortSignal?: AbortSignal;
+		},
+	): Promise<Result<FuzzySearchFileEntry[], FileError> | null> {
+		const command = `git -C ${shellQuote(baseDir)} rev-parse --is-inside-work-tree >/dev/null 2>&1 && git -C ${shellQuote(baseDir)} ls-files -co --exclude-standard -z -- .`;
+		const listed = await this.exec(command, { timeout: 5, abortSignal: options.abortSignal });
+		if (!listed.ok || listed.value.exitCode !== 0) return null;
+
+		const results: FuzzySearchFileEntry[] = [];
+		const seen = new Set<string>();
+		const addEntry = async (relativePath: string, kind: FileKind) => {
+			const normalized = relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+			if (!normalized || seen.has(normalized)) return;
+			if (!options.includeHidden && normalized.split("/").some((part) => part.startsWith("."))) return;
+			if (options.query && !normalized.toLowerCase().includes(options.query)) return;
+			seen.add(normalized);
+			let entryKind = kind;
+			let isDirectory = kind === "directory";
+			if (kind !== "directory") {
+				try {
+					const stats = await lstat(resolve(baseDir, normalized));
+					entryKind = fileKindFromStats(stats) ?? kind;
+					if (entryKind === "symlink" && options.followSymlinks) {
+						try {
+							await readdir(resolve(baseDir, normalized));
+							isDirectory = true;
+							entryKind = "directory";
+						} catch {}
+					}
+				} catch {}
+			}
+			results.push({ path: isDirectory ? `${normalized.replace(/\/+$/, "")}/` : normalized, kind: entryKind });
+		};
+
+		for (const rawPath of listed.value.stdout.split("\0")) {
+			if (results.length >= options.maxResults) break;
+			const relativePath = rawPath.replace(/^\.\//, "");
+			if (!relativePath) continue;
+			const parts = relativePath.split("/");
+			for (let i = 1; i < parts.length; i += 1) {
+				await addEntry(parts.slice(0, i).join("/"), "directory");
+				if (results.length >= options.maxResults) break;
+			}
+			if (results.length >= options.maxResults) break;
+			await addEntry(relativePath, "file");
+		}
+
+		return ok(results.slice(0, options.maxResults));
 	}
 
 	async canonicalPath(path: string): Promise<Result<string, FileError>> {

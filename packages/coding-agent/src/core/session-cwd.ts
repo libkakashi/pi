@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
 
 export interface SessionCwdIssue {
 	sessionFile?: string;
@@ -11,17 +11,19 @@ interface SessionCwdSource {
 	getSessionFile(): string | undefined;
 }
 
-export function getMissingSessionCwdIssue(
+export async function getMissingSessionCwdIssue(
 	sessionManager: SessionCwdSource,
 	fallbackCwd: string,
-): SessionCwdIssue | undefined {
+	executionEnv: ExecutionEnv,
+): Promise<SessionCwdIssue | undefined> {
 	const sessionFile = sessionManager.getSessionFile();
 	if (!sessionFile) {
 		return undefined;
 	}
 
 	const sessionCwd = sessionManager.getCwd();
-	if (!sessionCwd || existsSync(sessionCwd)) {
+	const exists = sessionCwd ? await executionEnv.exists(sessionCwd) : undefined;
+	if (!sessionCwd || (exists?.ok && exists.value)) {
 		return undefined;
 	}
 
@@ -51,8 +53,12 @@ export class MissingSessionCwdError extends Error {
 	}
 }
 
-export function assertSessionCwdExists(sessionManager: SessionCwdSource, fallbackCwd: string): void {
-	const issue = getMissingSessionCwdIssue(sessionManager, fallbackCwd);
+export async function assertSessionCwdExists(
+	sessionManager: SessionCwdSource,
+	fallbackCwd: string,
+	executionEnv: ExecutionEnv,
+): Promise<void> {
+	const issue = await getMissingSessionCwdIssue(sessionManager, fallbackCwd, executionEnv);
 	if (issue) {
 		throw new MissingSessionCwdError(issue);
 	}

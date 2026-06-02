@@ -1,12 +1,14 @@
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { describe, expect, it } from "vitest";
+import { NodeExecutionEnv } from "../../agent/src/env.ts";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.ts";
 import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, type Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
 const fixturesDir = resolve(__dirname, "fixtures/skills");
 const collisionFixturesDir = resolve(__dirname, "fixtures/skills-collision");
+const env = new NodeExecutionEnv({ cwd: process.cwd() });
 
 function createTestSkill(options: {
 	name: string;
@@ -28,8 +30,9 @@ function createTestSkill(options: {
 
 describe("skills", () => {
 	describe("loadSkillsFromDir", () => {
-		it("should load a valid skill", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should load a valid skill", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "valid-skill"),
 				source: "test",
 			});
@@ -41,8 +44,9 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should allow names that don't match parent directory", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should allow names that don't match parent directory", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "name-mismatch"),
 				source: "test",
 			});
@@ -54,8 +58,9 @@ describe("skills", () => {
 			).toBe(false);
 		});
 
-		it("should warn when name contains invalid characters", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should warn when name contains invalid characters", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "invalid-name-chars"),
 				source: "test",
 			});
@@ -64,8 +69,9 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("invalid characters"))).toBe(true);
 		});
 
-		it("should warn when name exceeds 64 characters", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should warn when name exceeds 64 characters", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "long-name"),
 				source: "test",
 			});
@@ -74,8 +80,9 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("exceeds 64 characters"))).toBe(true);
 		});
 
-		it("should warn and skip skill when description is missing", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should warn and skip skill when description is missing", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "missing-description"),
 				source: "test",
 			});
@@ -84,8 +91,9 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("description is required"))).toBe(true);
 		});
 
-		it("should ignore unknown frontmatter fields", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should ignore unknown frontmatter fields", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "unknown-field"),
 				source: "test",
 			});
@@ -94,8 +102,9 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should load nested skills recursively", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should load nested skills recursively", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "nested"),
 				source: "test",
 			});
@@ -105,8 +114,9 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should prefer a directory's root SKILL.md over nested SKILL.md files", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should prefer a directory's root SKILL.md over nested SKILL.md files", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "root-skill-preferred"),
 				source: "test",
 			});
@@ -117,8 +127,9 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should skip files without frontmatter", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should skip files without frontmatter", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "no-frontmatter"),
 				source: "test",
 			});
@@ -128,8 +139,9 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("description is required"))).toBe(true);
 		});
 
-		it("should warn and skip skill when YAML frontmatter is invalid", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should warn and skip skill when YAML frontmatter is invalid", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "invalid-yaml"),
 				source: "test",
 			});
@@ -138,8 +150,9 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("at line"))).toBe(true);
 		});
 
-		it("should preserve multiline descriptions from YAML", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should preserve multiline descriptions from YAML", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "multiline-description"),
 				source: "test",
 			});
@@ -150,8 +163,9 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should warn when name contains consecutive hyphens", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should warn when name contains consecutive hyphens", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "consecutive-hyphens"),
 				source: "test",
 			});
@@ -160,8 +174,9 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("consecutive hyphens"))).toBe(true);
 		});
 
-		it("should load all skills from fixture directory", () => {
-			const { skills } = loadSkillsFromDir({
+		it("should load all skills from fixture directory", async () => {
+			const { skills } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: fixturesDir,
 				source: "test",
 			});
@@ -172,8 +187,9 @@ describe("skills", () => {
 			expect(skills.length).toBeGreaterThanOrEqual(6);
 		});
 
-		it("should return empty for non-existent directory", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should return empty for non-existent directory", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: "/non/existent/path",
 				source: "test",
 			});
@@ -182,11 +198,12 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should use parent directory name when name not in frontmatter", () => {
+		it("should use parent directory name when name not in frontmatter", async () => {
 			// The no-frontmatter fixture has no name in frontmatter, so it should use "no-frontmatter"
 			// But it also has no description, so it won't load
 			// Let's test with a valid skill that relies on directory name
-			const { skills } = loadSkillsFromDir({
+			const { skills } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "valid-skill"),
 				source: "test",
 			});
@@ -195,8 +212,9 @@ describe("skills", () => {
 			expect(skills[0].name).toBe("valid-skill");
 		});
 
-		it("should parse disable-model-invocation frontmatter field", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({
+		it("should parse disable-model-invocation frontmatter field", async () => {
+			const { skills, diagnostics } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "disable-model-invocation"),
 				source: "test",
 			});
@@ -210,8 +228,9 @@ describe("skills", () => {
 			);
 		});
 
-		it("should default disableModelInvocation to false when not specified", () => {
-			const { skills } = loadSkillsFromDir({
+		it("should default disableModelInvocation to false when not specified", async () => {
+			const { skills } = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(fixturesDir, "valid-skill"),
 				source: "test",
 			});
@@ -222,12 +241,12 @@ describe("skills", () => {
 	});
 
 	describe("formatSkillsForPrompt", () => {
-		it("should return empty string for no skills", () => {
+		it("should return empty string for no skills", async () => {
 			const result = formatSkillsForPrompt([]);
 			expect(result).toBe("");
 		});
 
-		it("should format skills as XML", () => {
+		it("should format skills as XML", async () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
@@ -247,7 +266,7 @@ describe("skills", () => {
 			expect(result).toContain("<location>/path/to/skill/SKILL.md</location>");
 		});
 
-		it("should include intro text before XML", () => {
+		it("should include intro text before XML", async () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
@@ -265,7 +284,7 @@ describe("skills", () => {
 			expect(introText).toContain("Use the read tool to load a skill's file");
 		});
 
-		it("should escape XML special characters", () => {
+		it("should escape XML special characters", async () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
@@ -282,7 +301,7 @@ describe("skills", () => {
 			expect(result).toContain("&quot;characters&quot;");
 		});
 
-		it("should format multiple skills", () => {
+		it("should format multiple skills", async () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "skill-one",
@@ -305,7 +324,7 @@ describe("skills", () => {
 			expect((result.match(/<skill>/g) || []).length).toBe(2);
 		});
 
-		it("should exclude skills with disableModelInvocation from prompt", () => {
+		it("should exclude skills with disableModelInvocation from prompt", async () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "visible-skill",
@@ -329,7 +348,7 @@ describe("skills", () => {
 			expect((result.match(/<skill>/g) || []).length).toBe(1);
 		});
 
-		it("should return empty string when all skills have disableModelInvocation", () => {
+		it("should return empty string when all skills have disableModelInvocation", async () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "hidden-skill",
@@ -349,8 +368,9 @@ describe("skills", () => {
 		const emptyAgentDir = resolve(__dirname, "fixtures/empty-agent");
 		const emptyCwd = resolve(__dirname, "fixtures/empty-cwd");
 
-		it("should load from explicit skillPaths", () => {
-			const { skills, diagnostics } = loadSkills({
+		it("should load from explicit skillPaths", async () => {
+			const { skills, diagnostics } = await loadSkills({
+				executionEnv: env,
 				agentDir: emptyAgentDir,
 				cwd: emptyCwd,
 				skillPaths: [join(fixturesDir, "valid-skill")],
@@ -361,8 +381,9 @@ describe("skills", () => {
 			expect(diagnostics).toHaveLength(0);
 		});
 
-		it("should warn when skill path does not exist", () => {
-			const { skills, diagnostics } = loadSkills({
+		it("should warn when skill path does not exist", async () => {
+			const { skills, diagnostics } = await loadSkills({
+				executionEnv: env,
 				agentDir: emptyAgentDir,
 				cwd: emptyCwd,
 				skillPaths: ["/non/existent/path"],
@@ -372,15 +393,17 @@ describe("skills", () => {
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("does not exist"))).toBe(true);
 		});
 
-		it("should expand ~ in skillPaths", () => {
+		it("should expand ~ in skillPaths", async () => {
 			const homeSkillsDir = join(homedir(), ".pi/agent/skills");
-			const { skills: withTilde } = loadSkills({
+			const { skills: withTilde } = await loadSkills({
+				executionEnv: env,
 				agentDir: emptyAgentDir,
 				cwd: emptyCwd,
 				skillPaths: ["~/.pi/agent/skills"],
 				includeDefaults: true,
 			});
-			const { skills: withoutTilde } = loadSkills({
+			const { skills: withoutTilde } = await loadSkills({
+				executionEnv: env,
 				agentDir: emptyAgentDir,
 				cwd: emptyCwd,
 				skillPaths: [homeSkillsDir],
@@ -391,14 +414,16 @@ describe("skills", () => {
 	});
 
 	describe("collision handling", () => {
-		it("should detect name collisions and keep first skill", () => {
+		it("should detect name collisions and keep first skill", async () => {
 			// Load from first directory
-			const first = loadSkillsFromDir({
+			const first = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(collisionFixturesDir, "first"),
 				source: "first",
 			});
 
-			const second = loadSkillsFromDir({
+			const second = await loadSkillsFromDir({
+				executionEnv: env,
 				dir: join(collisionFixturesDir, "second"),
 				source: "second",
 			});

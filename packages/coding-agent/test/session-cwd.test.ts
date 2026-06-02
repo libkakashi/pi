@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { NodeExecutionEnv } from "../../agent/src/env.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { getMissingSessionCwdIssue, MissingSessionCwdError } from "../src/core/session-cwd.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -34,8 +35,9 @@ describe("session cwd handling", () => {
 		}
 	});
 
-	it("detects missing session cwd from persisted sessions", () => {
+	it("detects missing session cwd from persisted sessions", async () => {
 		const fallbackCwd = createTempDir("pi-session-cwd-fallback");
+		const executionEnv = new NodeExecutionEnv({ cwd: fallbackCwd });
 		const missingCwd = join(fallbackCwd, "does-not-exist");
 		const sessionDir = createTempDir("pi-session-cwd-session-dir");
 		const sessionFile = join(sessionDir, "session.jsonl");
@@ -43,7 +45,7 @@ describe("session cwd handling", () => {
 		writeSessionFile(sessionFile, missingCwd);
 
 		const sessionManager = SessionManager.open(sessionFile);
-		const issue = getMissingSessionCwdIssue(sessionManager, fallbackCwd);
+		const issue = await getMissingSessionCwdIssue(sessionManager, fallbackCwd, executionEnv);
 		expect(issue).toEqual({
 			sessionFile: sessionManager.getSessionFile(),
 			sessionCwd: missingCwd,
@@ -51,8 +53,9 @@ describe("session cwd handling", () => {
 		});
 	});
 
-	it("supports overriding the effective cwd when opening a session", () => {
+	it("supports overriding the effective cwd when opening a session", async () => {
 		const fallbackCwd = createTempDir("pi-session-cwd-override");
+		const executionEnv = new NodeExecutionEnv({ cwd: fallbackCwd });
 		const missingCwd = join(fallbackCwd, "does-not-exist");
 		const sessionDir = createTempDir("pi-session-cwd-override-session-dir");
 		const sessionFile = join(sessionDir, "session.jsonl");
@@ -61,7 +64,7 @@ describe("session cwd handling", () => {
 
 		const sessionManager = SessionManager.open(sessionFile, undefined, fallbackCwd);
 		expect(sessionManager.getCwd()).toBe(fallbackCwd);
-		expect(getMissingSessionCwdIssue(sessionManager, fallbackCwd)).toBeUndefined();
+		expect(await getMissingSessionCwdIssue(sessionManager, fallbackCwd, executionEnv)).toBeUndefined();
 	});
 
 	it("throws a controlled error before runtime creation when the stored cwd is missing", async () => {
@@ -84,6 +87,7 @@ describe("session cwd handling", () => {
 				cwd: fallbackCwd,
 				agentDir: fallbackCwd,
 				sessionManager,
+				executionEnv: new NodeExecutionEnv({ cwd: fallbackCwd }),
 			}),
 		).rejects.toBeInstanceOf(MissingSessionCwdError);
 		expect(createRuntimeCalled).toBe(false);

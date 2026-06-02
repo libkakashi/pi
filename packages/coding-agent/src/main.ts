@@ -6,6 +6,8 @@
  */
 
 import { createInterface } from "node:readline";
+import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
@@ -96,6 +98,12 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 
 type AppMode = "interactive" | "print" | "json" | "rpc";
 
+interface ResolvedExecutionEnv {
+	cwd: string;
+	env: ExecutionEnv;
+	diagnostics: AgentSessionRuntimeDiagnostic[];
+}
+
 function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
 	if (parsed.mode === "rpc") {
 		return "rpc";
@@ -113,8 +121,17 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 	return appMode === "json" ? "json" : "text";
 }
 
+async function createExecutionEnv(localCwd: string): Promise<ResolvedExecutionEnv> {
+	return {
+		cwd: localCwd,
+		env: new NodeExecutionEnv({ cwd: localCwd }),
+		diagnostics: [],
+	};
+}
+
 async function prepareInitialMessage(
 	parsed: Args,
+	executionEnv: ExecutionEnv,
 	autoResizeImages: boolean,
 	stdinContent?: string,
 ): Promise<{
@@ -125,7 +142,7 @@ async function prepareInitialMessage(
 		return buildInitialMessage({ parsed, stdinContent });
 	}
 
-	const { text, images } = await processFileArguments(parsed.fileArgs, { autoResizeImages });
+	const { text, images } = await processFileArguments(parsed.fileArgs, { executionEnv, autoResizeImages });
 	return buildInitialMessage({
 		parsed,
 		fileText: text,
@@ -538,14 +555,25 @@ export async function main(args: string[], options?: MainOptions) {
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
 
+	const stdinContentPromise =
+		appMode !== "rpc" && !parsed.help && parsed.listModels === undefined
+			? readPipedStdin()
+			: Promise.resolve(undefined);
+
 	// Run migrations (pass cwd for project-local migrations)
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
 	time("runMigrations");
 
-	const cwd = process.cwd();
+	const localCwd = process.cwd();
 	const agentDir = getAgentDir();
-	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	const startupSettingsManager = SettingsManager.create(localCwd, agentDir);
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
+	const resolvedExecutionEnv = await createExecutionEnv(localCwd);
+	reportDiagnostics(resolvedExecutionEnv.diagnostics);
+	if (resolvedExecutionEnv.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+		process.exit(1);
+	}
+	const cwd = resolvedExecutionEnv.cwd;
 
 	// Decide the final runtime cwd before creating cwd-bound runtime services.
 	// --session and --resume may select a session from another project, so project-local
@@ -558,7 +586,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
-	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
+	const missingSessionCwdIssue = await getMissingSessionCwdIssue(sessionManager, cwd, resolvedExecutionEnv.env);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
@@ -581,10 +609,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
-	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
-	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
-	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+	const resolvedExtensionPaths = resolveCliPaths(localCwd, parsed.extensions);
+	const resolvedSkillPaths = resolveCliPaths(localCwd, parsed.skills);
+	const resolvedPromptTemplatePaths = resolveCliPaths(localCwd, parsed.promptTemplates);
+	const resolvedThemePaths = resolveCliPaths(localCwd, parsed.themes);
 	const authStorage = AuthStorage.create();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
@@ -596,6 +624,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			authStorage,
+			executionEnv: resolvedExecutionEnv.env,
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
@@ -677,6 +706,7 @@ export async function main(args: string[], options?: MainOptions) {
 		cwd: sessionManager.getCwd(),
 		agentDir,
 		sessionManager,
+		executionEnv: resolvedExecutionEnv.env,
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
@@ -698,17 +728,15 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
-	let stdinContent: string | undefined;
-	if (appMode !== "rpc") {
-		stdinContent = await readPipedStdin();
-		if (stdinContent !== undefined && appMode === "interactive") {
-			appMode = "print";
-		}
+	const stdinContent = await stdinContentPromise;
+	if (stdinContent !== undefined && appMode === "interactive") {
+		appMode = "print";
 	}
 	time("readPipedStdin");
 
 	const { initialMessage, initialImages } = await prepareInitialMessage(
 		parsed,
+		resolvedExecutionEnv.env,
 		settingsManager.getImageAutoResize(),
 		stdinContent,
 	);

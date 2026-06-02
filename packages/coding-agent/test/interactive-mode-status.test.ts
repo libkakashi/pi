@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import { NodeExecutionEnv } from "../../agent/src/env.ts";
 import { type Component, Container, type Focusable, TUI } from "../../tui/src/tui.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
@@ -309,7 +310,8 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 		});
 
 		const fakeThis = {
-			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
+			createBaseAutocompleteProvider: () =>
+				new CombinedAutocompleteProvider([], "/tmp/project", new NodeExecutionEnv({ cwd: "/tmp/project" })),
 			defaultEditor,
 			editor: customEditor,
 			autocompleteProviderWrappers: [wrap1, wrap2],

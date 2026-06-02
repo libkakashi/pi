@@ -27,6 +27,8 @@ export interface WriteOperations {
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
 	/** Create directory recursively */
 	mkdir: (dir: string) => Promise<void>;
+	/** Return the serialization key for file mutation queueing. */
+	getMutationQueueKey?: (absolutePath: string) => Promise<string>;
 }
 
 const defaultWriteOperations: WriteOperations = {
@@ -200,29 +202,33 @@ export function createWriteToolDefinition(
 		) {
 			const absolutePath = resolveToCwd(path, cwd);
 			const dir = dirname(absolutePath);
-			return withFileMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
-				const throwIfAborted = (): void => {
-					if (signal?.aborted) throw new Error("Operation aborted");
-				};
+			return withFileMutationQueue(
+				absolutePath,
+				async () => {
+					// Do not reject from an abort event listener here: that would release the
+					// mutation queue while an in-flight filesystem operation may still finish.
+					// Checking signal.aborted after each await observes the same aborts while
+					// keeping the queue locked until the current operation has settled.
+					const throwIfAborted = (): void => {
+						if (signal?.aborted) throw new Error("Operation aborted");
+					};
 
-				throwIfAborted();
-				// Create parent directories if needed.
-				await ops.mkdir(dir);
-				throwIfAborted();
+					throwIfAborted();
+					// Create parent directories if needed.
+					await ops.mkdir(dir);
+					throwIfAborted();
 
-				// Write the file contents.
-				await ops.writeFile(absolutePath, content);
-				throwIfAborted();
+					// Write the file contents.
+					await ops.writeFile(absolutePath, content);
+					throwIfAborted();
 
-				return {
-					content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
-					details: undefined,
-				};
-			});
+					return {
+						content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
+						details: undefined,
+					};
+				},
+				ops.getMutationQueueKey,
+			);
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;

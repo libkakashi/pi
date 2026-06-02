@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ExecutionEnv, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
 import type { Model } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -36,8 +37,9 @@ export interface CreateAgentSessionServicesOptions {
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
 	modelRegistry?: ModelRegistry;
+	executionEnv?: ExecutionEnv;
 	extensionFlagValues?: Map<string, boolean | string>;
-	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
+	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager" | "executionEnv">;
 }
 
 /**
@@ -71,6 +73,7 @@ export interface AgentSessionServices {
 	authStorage: AuthStorage;
 	settingsManager: SettingsManager;
 	modelRegistry: ModelRegistry;
+	executionEnv: ExecutionEnv;
 	resourceLoader: ResourceLoader;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
@@ -136,11 +139,14 @@ export async function createAgentSessionServices(
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	const executionEnv =
+		options.executionEnv ?? new NodeExecutionEnv({ cwd, shellPath: settingsManager.getShellPath() });
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		cwd,
 		agentDir,
 		settingsManager,
+		executionEnv,
 	});
 	await resourceLoader.reload();
 
@@ -166,6 +172,7 @@ export async function createAgentSessionServices(
 		authStorage,
 		settingsManager,
 		modelRegistry,
+		executionEnv,
 		resourceLoader,
 		diagnostics,
 	};
@@ -196,6 +203,7 @@ export async function createAgentSessionFromServices(
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,
 		customTools: options.customTools,
+		executionEnv: options.services.executionEnv,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 }

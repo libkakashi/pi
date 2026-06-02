@@ -1,6 +1,4 @@
-import { spawn } from "child_process";
-import { readdirSync, statSync } from "fs";
-import { homedir } from "os";
+import type { ExecutionEnv, FileKind } from "@earendil-works/pi-agent-core";
 import { basename, dirname, join } from "path";
 import { fuzzyFilter } from "./fuzzy.ts";
 
@@ -8,38 +6,6 @@ const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
 function toDisplayPath(value: string): string {
 	return value.replace(/\\/g, "/");
-}
-
-function escapeRegex(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function buildFdPathQuery(query: string): string {
-	const normalized = toDisplayPath(query);
-	if (!normalized.includes("/")) {
-		return normalized;
-	}
-
-	const hasTrailingSeparator = normalized.endsWith("/");
-	const trimmed = normalized.replace(/^\/+|\/+$/g, "");
-	if (!trimmed) {
-		return normalized;
-	}
-
-	const separatorPattern = "[\\\\/]";
-	const segments = trimmed
-		.split("/")
-		.filter(Boolean)
-		.map((segment) => escapeRegex(segment));
-	if (segments.length === 0) {
-		return normalized;
-	}
-
-	let pattern = segments.join(separatorPattern);
-	if (hasTrailingSeparator) {
-		pattern += separatorPattern;
-	}
-	return pattern;
 }
 
 function findLastDelimiter(text: string): number {
@@ -120,102 +86,6 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
-// Use fd to walk directory tree (fast, respects .gitignore)
-async function walkDirectoryWithFd(
-	baseDir: string,
-	fdPath: string,
-	query: string,
-	maxResults: number,
-	signal: AbortSignal,
-): Promise<Array<{ path: string; isDirectory: boolean }>> {
-	const args = [
-		"--base-directory",
-		baseDir,
-		"--max-results",
-		String(maxResults),
-		"--type",
-		"f",
-		"--type",
-		"d",
-		"--follow",
-		"--hidden",
-		"--exclude",
-		".git",
-		"--exclude",
-		".git/*",
-		"--exclude",
-		".git/**",
-	];
-
-	if (toDisplayPath(query).includes("/")) {
-		args.push("--full-path");
-	}
-
-	if (query) {
-		args.push(buildFdPathQuery(query));
-	}
-
-	return await new Promise((resolve) => {
-		if (signal.aborted) {
-			resolve([]);
-			return;
-		}
-
-		const child = spawn(fdPath, args, {
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		let stdout = "";
-		let resolved = false;
-
-		const finish = (results: Array<{ path: string; isDirectory: boolean }>) => {
-			if (resolved) return;
-			resolved = true;
-			signal.removeEventListener("abort", onAbort);
-			resolve(results);
-		};
-
-		const onAbort = () => {
-			if (child.exitCode === null) {
-				child.kill("SIGKILL");
-			}
-		};
-
-		signal.addEventListener("abort", onAbort, { once: true });
-		child.stdout.setEncoding("utf-8");
-		child.stdout.on("data", (chunk: string) => {
-			stdout += chunk;
-		});
-		child.on("error", () => {
-			finish([]);
-		});
-		child.on("close", (code) => {
-			if (signal.aborted || code !== 0 || !stdout) {
-				finish([]);
-				return;
-			}
-
-			const lines = stdout.trim().split("\n").filter(Boolean);
-			const results: Array<{ path: string; isDirectory: boolean }> = [];
-
-			for (const line of lines) {
-				const displayLine = toDisplayPath(line);
-				const hasTrailingSeparator = displayLine.endsWith("/");
-				const normalizedPath = hasTrailingSeparator ? displayLine.slice(0, -1) : displayLine;
-				if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) {
-					continue;
-				}
-
-				results.push({
-					path: displayLine,
-					isDirectory: hasTrailingSeparator,
-				});
-			}
-
-			finish(results);
-		});
-	});
-}
-
 export interface AutocompleteItem {
 	value: string;
 	label: string;
@@ -270,12 +140,13 @@ export interface AutocompleteProvider {
 export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	private commands: (SlashCommand | AutocompleteItem)[];
 	private basePath: string;
-	private fdPath: string | null;
+	private executionEnv: ExecutionEnv;
+	private homePath?: Promise<string | undefined>;
 
-	constructor(commands: (SlashCommand | AutocompleteItem)[] = [], basePath: string, fdPath: string | null = null) {
+	constructor(commands: (SlashCommand | AutocompleteItem)[] = [], basePath: string, executionEnv: ExecutionEnv) {
 		this.commands = commands;
 		this.basePath = basePath;
-		this.fdPath = fdPath;
+		this.executionEnv = executionEnv;
 	}
 
 	async getSuggestions(
@@ -360,7 +231,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			return null;
 		}
 
-		const suggestions = this.getFileSuggestions(pathMatch);
+		const suggestions = await this.getFileSuggestions(pathMatch, options.signal);
 		if (suggestions.length === 0) return null;
 
 		return {
@@ -504,18 +375,40 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	}
 
 	// Expand home directory (~/) to actual home path
-	private expandHomePath(path: string): string {
-		if (path.startsWith("~/")) {
-			const expandedPath = join(homedir(), path.slice(2));
-			// Preserve trailing slash if original path had one
-			return path.endsWith("/") && !expandedPath.endsWith("/") ? `${expandedPath}/` : expandedPath;
-		} else if (path === "~") {
-			return homedir();
+	private async expandHomePath(path: string): Promise<string> {
+		if (path !== "~" && !path.startsWith("~/")) {
+			return path;
 		}
-		return path;
+
+		const home = await this.resolveHomePath();
+		if (!home) return path;
+		if (path === "~") return home;
+
+		const joined = await this.executionEnv.joinPath([home, path.slice(2)]);
+		const expanded = joined.ok ? joined.value : `${home}/${path.slice(2)}`;
+		return path.endsWith("/") && !expanded.endsWith("/") ? `${expanded}/` : expanded;
 	}
 
-	private resolveScopedFuzzyQuery(rawQuery: string): { baseDir: string; query: string; displayBase: string } | null {
+	private async resolveHomePath(): Promise<string | undefined> {
+		this.homePath ??= this.executionEnv.exec('printf "%s" "$HOME"', { timeout: 2 }).then((result) => {
+			if (!result.ok || result.value.exitCode !== 0) return undefined;
+			const value = result.value.stdout.trim();
+			return value || undefined;
+		});
+		return await this.homePath;
+	}
+
+	private async isDirectoryEntry(path: string, kind: FileKind, signal: AbortSignal): Promise<boolean> {
+		if (kind === "directory") return true;
+		if (kind !== "symlink") return false;
+		const listed = await this.executionEnv.listDir(path, signal);
+		return listed.ok;
+	}
+
+	private async resolveScopedFuzzyQuery(
+		rawQuery: string,
+		signal: AbortSignal,
+	): Promise<{ baseDir: string; query: string; displayBase: string } | null> {
 		const normalizedQuery = toDisplayPath(rawQuery);
 		const slashIndex = normalizedQuery.lastIndexOf("/");
 		if (slashIndex === -1) {
@@ -527,18 +420,15 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		let baseDir: string;
 		if (displayBase.startsWith("~/")) {
-			baseDir = this.expandHomePath(displayBase);
+			baseDir = await this.expandHomePath(displayBase);
 		} else if (displayBase.startsWith("/")) {
 			baseDir = displayBase;
 		} else {
 			baseDir = join(this.basePath, displayBase);
 		}
 
-		try {
-			if (!statSync(baseDir).isDirectory()) {
-				return null;
-			}
-		} catch {
+		const info = await this.executionEnv.fileInfo(baseDir, signal);
+		if (!info.ok || info.value.kind !== "directory") {
 			return null;
 		}
 
@@ -554,7 +444,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	}
 
 	// Get file/directory suggestions for a given path prefix
-	private getFileSuggestions(prefix: string): AutocompleteItem[] {
+	private async getFileSuggestions(prefix: string, signal: AbortSignal): Promise<AutocompleteItem[]> {
 		try {
 			let searchDir: string;
 			let searchPrefix: string;
@@ -563,7 +453,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 			// Handle home directory expansion
 			if (expandedPrefix.startsWith("~")) {
-				expandedPrefix = this.expandHomePath(expandedPrefix);
+				expandedPrefix = await this.expandHomePath(expandedPrefix);
 			}
 
 			const isRootPrefix =
@@ -603,24 +493,18 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				searchPrefix = file;
 			}
 
-			const entries = readdirSync(searchDir, { withFileTypes: true });
+			const entries = await this.executionEnv.listDir(searchDir, signal);
+			if (!entries.ok) {
+				return [];
+			}
 			const suggestions: AutocompleteItem[] = [];
 
-			for (const entry of entries) {
+			for (const entry of entries.value) {
 				if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) {
 					continue;
 				}
 
-				// Check if entry is a directory (or a symlink pointing to a directory)
-				let isDirectory = entry.isDirectory();
-				if (!isDirectory && entry.isSymbolicLink()) {
-					try {
-						const fullPath = join(searchDir, entry.name);
-						isDirectory = statSync(fullPath).isDirectory();
-					} catch {
-						// Broken symlink or permission error - treat as file
-					}
-				}
+				const isDirectory = await this.isDirectoryEntry(entry.path, entry.kind, signal);
 
 				let relativePath: string;
 				const name = entry.name;
@@ -713,28 +597,38 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return score;
 	}
 
-	// Fuzzy file search using fd (fast, respects .gitignore)
+	// Fuzzy file search through the execution environment.
 	private async getFuzzyFileSuggestions(
 		query: string,
 		options: { isQuotedPrefix: boolean; signal: AbortSignal },
 	): Promise<AutocompleteItem[]> {
-		if (!this.fdPath || options.signal.aborted) {
+		if (options.signal.aborted) {
 			return [];
 		}
 
 		try {
-			const scopedQuery = this.resolveScopedFuzzyQuery(query);
-			const fdBaseDir = scopedQuery?.baseDir ?? this.basePath;
-			const fdQuery = scopedQuery?.query ?? query;
-			const entries = await walkDirectoryWithFd(fdBaseDir, this.fdPath, fdQuery, 100, options.signal);
+			const scopedQuery = await this.resolveScopedFuzzyQuery(query, options.signal);
+			const searchBaseDir = scopedQuery?.baseDir ?? this.basePath;
+			const searchQuery = scopedQuery?.query ?? query;
+			const entries = await this.executionEnv.fuzzySearchFiles({
+				baseDir: searchBaseDir,
+				query: searchQuery,
+				maxResults: 100,
+				includeHidden: true,
+				followSymlinks: true,
+				exclude: [".git"],
+				abortSignal: options.signal,
+			});
+			if (!entries.ok) return [];
 			if (options.signal.aborted) {
 				return [];
 			}
 
-			const scoredEntries = entries
+			const scoredEntries = entries.value
 				.map((entry) => ({
 					...entry,
-					score: fdQuery ? this.scoreEntry(entry.path, fdQuery, entry.isDirectory) : 1,
+					isDirectory: entry.kind === "directory",
+					score: searchQuery ? this.scoreEntry(entry.path, searchQuery, entry.kind === "directory") : 1,
 				}))
 				.filter((entry) => entry.score > 0);
 

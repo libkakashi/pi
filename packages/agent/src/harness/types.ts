@@ -240,6 +240,30 @@ export interface FileInfo {
 	mtimeMs: number;
 }
 
+export interface FuzzySearchFileEntry {
+	/** Path relative to the requested search root, using the execution environment's path separator semantics. */
+	path: string;
+	/** Addressed file kind. Symlink targets may be followed when requested by the implementation. */
+	kind: FileKind;
+}
+
+export interface FuzzySearchFilesOptions {
+	/** Directory to search. Relative paths are resolved against {@link ExecutionEnv.cwd}. Defaults to {@link ExecutionEnv.cwd}. */
+	baseDir?: string;
+	/** Query used by the execution environment to prefilter candidates. */
+	query?: string;
+	/** Maximum number of entries to return. Defaults to 100. */
+	maxResults?: number;
+	/** Include hidden files and directories. Defaults to true. */
+	includeHidden?: boolean;
+	/** Follow symlinked directories where supported. Defaults to true. */
+	followSymlinks?: boolean;
+	/** Directory/file names to exclude during traversal. Defaults to [".git"]. */
+	exclude?: string[];
+	/** Abort signal used to terminate the search. Defaults to no abort signal. */
+	abortSignal?: AbortSignal;
+}
+
 /** Options for {@link Shell.exec}. */
 export interface ExecutionEnvExecOptions {
 	/** Working directory for the command. Relative paths are resolved against {@link ExecutionEnv.cwd}. Defaults to {@link ExecutionEnv.cwd}. */
@@ -290,6 +314,8 @@ export interface FileSystem {
 	fileInfo(path: string, abortSignal?: AbortSignal): Promise<Result<FileInfo, FileError>>;
 	/** List direct children of a directory without following symlinks. */
 	listDir(path: string, abortSignal?: AbortSignal): Promise<Result<FileInfo[], FileError>>;
+	/** Search files for autocomplete-style fuzzy matching. */
+	fuzzySearchFiles(options?: FuzzySearchFilesOptions): Promise<Result<FuzzySearchFileEntry[], FileError>>;
 	/** Return the canonical path for an existing path, resolving symlinks where supported. */
 	canonicalPath(path: string, abortSignal?: AbortSignal): Promise<Result<string, FileError>>;
 	/** Return false for missing paths. Other errors, such as permission failures, return a {@link FileError}. */

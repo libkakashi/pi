@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
+import { NodeExecutionEnv } from "../../agent/src/harness/env/nodejs.ts";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 import { Editor, wordWrapLine } from "../src/components/editor.ts";
 import { TUI } from "../src/tui.ts";
@@ -11,6 +12,11 @@ import { VirtualTerminal } from "./virtual-terminal.ts";
 /** Create a TUI with a virtual terminal for testing */
 function createTestTUI(cols = 80, rows = 24): TUI {
 	return new TUI(new VirtualTerminal(cols, rows));
+}
+
+function createAutocompleteProvider(commands: ConstructorParameters<typeof CombinedAutocompleteProvider>[0]) {
+	const cwd = process.cwd();
+	return new CombinedAutocompleteProvider(commands, cwd, new NodeExecutionEnv({ cwd }));
 }
 
 /** Standard applyCompletion that replaces prefix with item.value */
@@ -2633,17 +2639,14 @@ describe("Editor component", () => {
 
 		it("awaits async slash command argument completions", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{
-						name: "load-skills",
-						description: "Load skills",
-						getArgumentCompletions: async (prefix) =>
-							prefix.startsWith("s") ? [{ value: "skill-a", label: "skill-a" }] : null,
-					},
-				],
-				process.cwd(),
-			);
+			const provider = createAutocompleteProvider([
+				{
+					name: "load-skills",
+					description: "Load skills",
+					getArgumentCompletions: async (prefix) =>
+						prefix.startsWith("s") ? [{ value: "skill-a", label: "skill-a" }] : null,
+				},
+			]);
 			editor.setAutocompleteProvider(provider);
 			editor.setText("/load-skills ");
 
@@ -2658,18 +2661,15 @@ describe("Editor component", () => {
 
 		it("ignores invalid slash command argument completion results", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{
-						name: "load-skills",
-						description: "Load skills",
-						getArgumentCompletions: (() => "not-an-array") as unknown as (
-							argumentPrefix: string,
-						) => Promise<{ value: string; label: string }[] | null>,
-					},
-				],
-				process.cwd(),
-			);
+			const provider = createAutocompleteProvider([
+				{
+					name: "load-skills",
+					description: "Load skills",
+					getArgumentCompletions: (() => "not-an-array") as unknown as (
+						argumentPrefix: string,
+					) => Promise<{ value: string; label: string }[] | null>,
+				},
+			]);
 			editor.setAutocompleteProvider(provider);
 			editor.setText("/load-skills ");
 
@@ -2681,17 +2681,14 @@ describe("Editor component", () => {
 
 		it("does not show argument completions when command has no argument completer", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{ name: "help", description: "Show help" },
-					{
-						name: "model",
-						description: "Switch model",
-						getArgumentCompletions: () => [{ value: "claude-opus", label: "claude-opus" }],
-					},
-				],
-				process.cwd(),
-			);
+			const provider = createAutocompleteProvider([
+				{ name: "help", description: "Show help" },
+				{
+					name: "model",
+					description: "Switch model",
+					getArgumentCompletions: () => [{ value: "claude-opus", label: "claude-opus" }],
+				},
+			]);
 			editor.setAutocompleteProvider(provider);
 
 			editor.handleInput("/");

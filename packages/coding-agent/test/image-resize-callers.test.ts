@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NodeExecutionEnv } from "../../agent/src/env.ts";
 
 vi.mock("../src/utils/image-resize.js", () => ({
 	resizeImage: vi.fn(),
@@ -17,10 +18,12 @@ const TINY_PNG_BASE64 =
 
 describe("image resize callers", () => {
 	let testDir: string;
+	let executionEnv: NodeExecutionEnv;
 
 	beforeEach(() => {
 		testDir = join(tmpdir(), `image-resize-callers-${Date.now()}`);
 		mkdirSync(testDir, { recursive: true });
+		executionEnv = new NodeExecutionEnv({ cwd: testDir });
 		vi.mocked(resizeImage).mockReset();
 		vi.mocked(resizeImage).mockResolvedValue(null);
 	});
@@ -45,7 +48,7 @@ describe("image resize callers", () => {
 		const imagePath = join(testDir, "test.png");
 		writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const result = await processFileArguments([imagePath]);
+		const result = await processFileArguments([imagePath], { executionEnv });
 
 		expect(result.images).toHaveLength(0);
 		expect(result.text).toContain("Image omitted");

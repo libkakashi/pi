@@ -1,5 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -195,7 +197,7 @@ export class AgentSessionRuntime {
 
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
-		assertSessionCwdExists(sessionManager, this.cwd);
+		await assertSessionCwdExists(sessionManager, this.cwd, this.services.executionEnv);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(
 			await this.createRuntime({
@@ -360,7 +362,7 @@ export class AgentSessionRuntime {
 		}
 
 		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
-		assertSessionCwdExists(sessionManager, this.cwd);
+		await assertSessionCwdExists(sessionManager, this.cwd, this.services.executionEnv);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(
 			await this.createRuntime({
@@ -396,10 +398,15 @@ export async function createAgentSessionRuntime(
 		cwd: string;
 		agentDir: string;
 		sessionManager: SessionManager;
+		executionEnv?: ExecutionEnv;
 		sessionStartEvent?: SessionStartEvent;
 	},
 ): Promise<AgentSessionRuntime> {
-	assertSessionCwdExists(options.sessionManager, options.cwd);
+	await assertSessionCwdExists(
+		options.sessionManager,
+		options.cwd,
+		options.executionEnv ?? new NodeExecutionEnv({ cwd: options.cwd }),
+	);
 	const result = await createRuntime(options);
 	return new AgentSessionRuntime(
 		result.session,

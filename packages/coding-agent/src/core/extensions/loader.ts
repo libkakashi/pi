@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as _bundledPiAgentCore from "@earendil-works/pi-agent-core";
+import * as _bundledPiAgentCoreEnv from "@earendil-works/pi-agent-core/env";
 import * as _bundledPiAi from "@earendil-works/pi-ai";
 import * as _bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
 import type { KeyId } from "@earendil-works/pi-tui";
@@ -49,11 +50,13 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox/compile": _bundledTypeboxCompile,
 	"@sinclair/typebox/value": _bundledTypeboxValue,
 	"@earendil-works/pi-agent-core": _bundledPiAgentCore,
+	"@earendil-works/pi-agent-core/env": _bundledPiAgentCoreEnv,
 	"@earendil-works/pi-tui": _bundledPiTui,
 	"@earendil-works/pi-ai": _bundledPiAi,
 	"@earendil-works/pi-ai/oauth": _bundledPiAiOauth,
 	"@earendil-works/pi-coding-agent": _bundledPiCodingAgent,
 	"@mariozechner/pi-agent-core": _bundledPiAgentCore,
+	"@mariozechner/pi-agent-core/env": _bundledPiAgentCoreEnv,
 	"@mariozechner/pi-tui": _bundledPiTui,
 	"@mariozechner/pi-ai": _bundledPiAi,
 	"@mariozechner/pi-ai/oauth": _bundledPiAiOauth,
@@ -79,28 +82,42 @@ function getAliases(): Record<string, string> {
 	const typeboxValueEntry = require.resolve("typebox/value");
 
 	const packagesRoot = path.resolve(__dirname, "../../../../");
-	const resolveWorkspaceOrImport = (workspaceRelativePath: string, specifier: string): string => {
-		const workspacePath = path.join(packagesRoot, workspaceRelativePath);
-		if (fs.existsSync(workspacePath)) {
-			return workspacePath;
+	const resolveWorkspaceOrImport = (workspaceRelativePaths: string[], specifier: string): string => {
+		for (const workspaceRelativePath of workspaceRelativePaths) {
+			const workspacePath = path.join(packagesRoot, workspaceRelativePath);
+			if (fs.existsSync(workspacePath)) {
+				return workspacePath;
+			}
 		}
 		return fileURLToPath(import.meta.resolve(specifier));
 	};
 
 	const piCodingAgentEntry = packageIndex;
-	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@earendil-works/pi-agent-core");
-	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@earendil-works/pi-tui");
-	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@earendil-works/pi-ai");
-	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@earendil-works/pi-ai/oauth");
+	const piAgentCoreEntry = resolveWorkspaceOrImport(
+		["agent/src/index.ts", "agent/dist/index.js"],
+		"@earendil-works/pi-agent-core",
+	);
+	const piAgentCoreEnvEntry = resolveWorkspaceOrImport(
+		["agent/src/env.ts", "agent/dist/env.js"],
+		"@earendil-works/pi-agent-core/env",
+	);
+	const piTuiEntry = resolveWorkspaceOrImport(["tui/src/index.ts", "tui/dist/index.js"], "@earendil-works/pi-tui");
+	const piAiEntry = resolveWorkspaceOrImport(["ai/src/index.ts", "ai/dist/index.js"], "@earendil-works/pi-ai");
+	const piAiOauthEntry = resolveWorkspaceOrImport(
+		["ai/src/oauth.ts", "ai/dist/oauth.js"],
+		"@earendil-works/pi-ai/oauth",
+	);
 
 	_aliases = {
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
 		"@earendil-works/pi-agent-core": piAgentCoreEntry,
+		"@earendil-works/pi-agent-core/env": piAgentCoreEnvEntry,
 		"@earendil-works/pi-tui": piTuiEntry,
 		"@earendil-works/pi-ai": piAiEntry,
 		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
+		"@mariozechner/pi-agent-core/env": piAgentCoreEnvEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
 		"@mariozechner/pi-ai": piAiEntry,
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,

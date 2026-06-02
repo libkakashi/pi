@@ -1,21 +1,10 @@
 import assert from "node:assert";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
+import { NodeExecutionEnv } from "../../agent/src/harness/env/nodejs.ts";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.ts";
-
-const resolveFdPath = (): string | null => {
-	const command = process.platform === "win32" ? "where" : "which";
-	const result = spawnSync(command, ["fd"], { encoding: "utf-8" });
-	if (result.status !== 0 || !result.stdout) {
-		return null;
-	}
-
-	const firstLine = result.stdout.split(/\r?\n/).find(Boolean);
-	return firstLine ? firstLine.trim() : null;
-};
 
 type FolderStructure = {
 	dirs?: string[];
@@ -36,15 +25,9 @@ const setupFolder = (baseDir: string, structure: FolderStructure = {}): void => 
 	});
 };
 
-const fdPath = resolveFdPath();
-const isFdInstalled = Boolean(fdPath);
-
-const requireFdPath = (): string => {
-	if (!fdPath) {
-		throw new Error("fd is not available");
-	}
-	return fdPath;
-};
+function createProvider(commands: ConstructorParameters<typeof CombinedAutocompleteProvider>[0], baseDir: string) {
+	return new CombinedAutocompleteProvider(commands, baseDir, new NodeExecutionEnv({ cwd: baseDir }));
+}
 
 const getSuggestions = (
 	provider: CombinedAutocompleteProvider,
@@ -57,7 +40,7 @@ const getSuggestions = (
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {
 		it("extracts / from 'hey /' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const provider = createProvider([], "/tmp");
 			const lines = ["hey /"];
 			const cursorLine = 0;
 			const cursorCol = 5; // After the "/"
@@ -71,7 +54,7 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 
 		it("extracts /A from '/A' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const provider = createProvider([], "/tmp");
 			const lines = ["/A"];
 			const cursorLine = 0;
 			const cursorCol = 2; // After the "A"
@@ -87,7 +70,7 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 
 		it("does not trigger for slash commands", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const provider = createProvider([], "/tmp");
 			const lines = ["/model"];
 			const cursorLine = 0;
 			const cursorCol = 6; // After "model"
@@ -99,7 +82,7 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 
 		it("triggers for absolute paths after slash command argument", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const provider = createProvider([], "/tmp");
 			const lines = ["/command /"];
 			const cursorLine = 0;
 			const cursorCol = 10; // After the second "/"
@@ -114,7 +97,7 @@ describe("CombinedAutocompleteProvider", () => {
 		});
 	});
 
-	describe("fd @ file suggestions", { skip: !isFdInstalled }, () => {
+	describe("@ file suggestions", () => {
 		let rootDir = "";
 		let baseDir = "";
 		let outsideDir = "";
@@ -139,7 +122,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -154,7 +137,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@file.txt";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -170,7 +153,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@re";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -186,7 +169,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@src";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -203,7 +186,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@index";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -219,7 +202,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@tui/src/auto";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -236,7 +219,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@components/";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -254,7 +237,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@../outside/a";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -272,7 +255,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@my";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -290,7 +273,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -313,7 +296,7 @@ describe("CombinedAutocompleteProvider", () => {
 			});
 			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@some";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -330,7 +313,7 @@ describe("CombinedAutocompleteProvider", () => {
 			});
 			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@symlinked";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -347,7 +330,7 @@ describe("CombinedAutocompleteProvider", () => {
 			const linkPath = join(baseDir, "link.txt");
 			symlinkSync("original.txt", linkPath);
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = "@link";
 			const result = await getSuggestions(provider, [line], 0, line.length);
 
@@ -372,8 +355,8 @@ describe("CombinedAutocompleteProvider", () => {
 			setupFolder(queryInPathBaseDir, structure);
 
 			const query = "@plan";
-			const normalProvider = new CombinedAutocompleteProvider([], normalBaseDir, requireFdPath());
-			const queryInPathProvider = new CombinedAutocompleteProvider([], queryInPathBaseDir, requireFdPath());
+			const normalProvider = createProvider([], normalBaseDir);
+			const queryInPathProvider = createProvider([], queryInPathBaseDir);
 
 			const normalResult = await getSuggestions(normalProvider, [query], 0, query.length);
 			const queryInPathResult = await getSuggestions(queryInPathProvider, [query], 0, query.length);
@@ -396,7 +379,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = '@"my folder/"';
 			const result = await getSuggestions(provider, [line], 0, line.length - 1);
 
@@ -413,7 +396,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const provider = createProvider([], baseDir);
 			const line = '@"my folder/te"';
 			const cursorCol = line.length - 1;
 			const result = await getSuggestions(provider, [line], 0, cursorCol);
@@ -446,7 +429,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const provider = createProvider([], baseDir);
 			const line = "./up";
 			const result = await getSuggestions(provider, [line], 0, line.length, true);
 
@@ -463,7 +446,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const provider = createProvider([], baseDir);
 			const line = "./sr";
 			const result = await getSuggestions(provider, [line], 0, line.length, true);
 
@@ -492,7 +475,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const provider = createProvider([], baseDir);
 			const line = "my";
 			const result = await getSuggestions(provider, [line], 0, line.length, true);
 
@@ -509,7 +492,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const provider = createProvider([], baseDir);
 			const line = '"my folder/"';
 			const result = await getSuggestions(provider, [line], 0, line.length - 1, true);
 
@@ -526,7 +509,7 @@ describe("CombinedAutocompleteProvider", () => {
 				},
 			});
 
-			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const provider = createProvider([], baseDir);
 			const line = '"my folder/te"';
 			const cursorCol = line.length - 1;
 			const result = await getSuggestions(provider, [line], 0, cursorCol, true);

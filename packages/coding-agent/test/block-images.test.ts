@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { NodeExecutionEnv } from "../../agent/src/env.ts";
 import { processFileArguments } from "../src/cli/file-processor.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
@@ -85,10 +86,12 @@ describe("blockImages setting", () => {
 
 	describe("processFileArguments", () => {
 		let testDir: string;
+		let executionEnv: NodeExecutionEnv;
 
 		beforeEach(() => {
 			testDir = join(tmpdir(), `block-images-process-test-${Date.now()}`);
 			mkdirSync(testDir, { recursive: true });
+			executionEnv = new NodeExecutionEnv({ cwd: testDir });
 		});
 
 		afterEach(() => {
@@ -100,7 +103,7 @@ describe("blockImages setting", () => {
 			const imagePath = join(testDir, "test.png");
 			writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-			const result = await processFileArguments([imagePath]);
+			const result = await processFileArguments([imagePath], { executionEnv });
 
 			expect(result.images).toHaveLength(1);
 			expect(result.images[0].type).toBe("image");
@@ -111,7 +114,7 @@ describe("blockImages setting", () => {
 			const textPath = join(testDir, "test.txt");
 			writeFileSync(textPath, "Hello, world!");
 
-			const result = await processFileArguments([textPath]);
+			const result = await processFileArguments([textPath], { executionEnv });
 
 			expect(result.images).toHaveLength(0);
 			expect(result.text).toContain("Hello, world!");

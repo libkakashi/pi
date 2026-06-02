@@ -92,6 +92,44 @@ describe("NodeExecutionEnv", () => {
 		]);
 	});
 
+	it("fuzzy searches files, hidden paths, and followed symlink directories", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		getOrThrow(await env.writeFile("src/alpha.ts", "export {};"));
+		getOrThrow(await env.writeFile("src/deeper/beta-alpha.ts", "export {};"));
+		getOrThrow(await env.writeFile(".pi/config.json", "{}"));
+		getOrThrow(await env.writeFile(".git/config", "[core]"));
+		getOrThrow(await env.writeFile("outside/symlinked-alpha.ts", "export {};"));
+		await symlink(join(root, "outside"), join(root, "linked"));
+
+		const alpha = getOrThrow(await env.fuzzySearchFiles({ query: "alpha", maxResults: 20 }));
+		expect(alpha.map((entry) => entry.path).sort()).toEqual([
+			"linked/symlinked-alpha.ts",
+			"outside/symlinked-alpha.ts",
+			"src/alpha.ts",
+			"src/deeper/beta-alpha.ts",
+		]);
+
+		expect(
+			getOrThrow(await env.fuzzySearchFiles({ query: "config", maxResults: 20 })).map((entry) => entry.path),
+		).toEqual([".pi/config.json"]);
+	});
+
+	it("fuzzy search respects gitignore while including untracked files", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		getOrThrow(await env.exec("git init"));
+		getOrThrow(await env.writeFile(".gitignore", "ignored.txt\nignored-dir/\n"));
+		getOrThrow(await env.writeFile("visible.txt", "visible"));
+		getOrThrow(await env.writeFile("ignored.txt", "ignored"));
+		getOrThrow(await env.writeFile("ignored-dir/ignored-nested.txt", "ignored"));
+
+		expect(
+			getOrThrow(await env.fuzzySearchFiles({ query: "visible", maxResults: 20 })).map((entry) => entry.path),
+		).toEqual(["visible.txt"]);
+		expect(getOrThrow(await env.fuzzySearchFiles({ query: "ignored", maxResults: 20 }))).toEqual([]);
+	});
+
 	it("stops reading text lines at the requested limit", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
@@ -113,6 +151,14 @@ describe("NodeExecutionEnv", () => {
 			});
 		}
 		expect(getOrThrow(await env.exists("missing.txt"))).toBe(false);
+		const read = await env.readTextFile("missing.txt");
+		expect(read.ok).toBe(false);
+		if (!read.ok) {
+			expect(read.error).toMatchObject({
+				code: "not_found",
+				path: join(root, "missing.txt"),
+			});
+		}
 	});
 
 	it("returns FileError for listing non-directories", async () => {

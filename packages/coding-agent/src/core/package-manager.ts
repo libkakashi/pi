@@ -1,7 +1,9 @@
 import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
 
 function getEnv(): NodeJS.ProcessEnv {
 	if (process.platform !== "linux" || Object.keys(process.env).length > 0) {
@@ -111,6 +113,7 @@ interface PackageManagerOptions {
 	cwd: string;
 	agentDir: string;
 	settingsManager: SettingsManager;
+	executionEnv?: ExecutionEnv;
 }
 
 type SourceScope = "user" | "project" | "temporary";
@@ -412,41 +415,6 @@ function collectAutoSkillEntries(dir: string, mode: SkillDiscoveryMode): string[
 	return collectSkillEntries(dir, mode);
 }
 
-function findGitRepoRoot(startDir: string): string | null {
-	let dir = resolve(startDir);
-	while (true) {
-		if (existsSync(join(dir, ".git"))) {
-			return dir;
-		}
-		const parent = dirname(dir);
-		if (parent === dir) {
-			return null;
-		}
-		dir = parent;
-	}
-}
-
-function collectAncestorAgentsSkillDirs(startDir: string): string[] {
-	const skillDirs: string[] = [];
-	const resolvedStartDir = resolve(startDir);
-	const gitRepoRoot = findGitRepoRoot(resolvedStartDir);
-
-	let dir = resolvedStartDir;
-	while (true) {
-		skillDirs.push(join(dir, ".agents", "skills"));
-		if (gitRepoRoot && dir === gitRepoRoot) {
-			break;
-		}
-		const parent = dirname(dir);
-		if (parent === dir) {
-			break;
-		}
-		dir = parent;
-	}
-
-	return skillDirs;
-}
-
 function collectAutoPromptEntries(dir: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
@@ -615,6 +583,117 @@ function collectAutoExtensionEntries(dir: string): string[] {
 	return entries;
 }
 
+async function envJoin(env: ExecutionEnv, parts: string[]): Promise<string> {
+	const joined = await env.joinPath(parts);
+	return joined.ok ? joined.value : parts.join("/");
+}
+
+async function addEnvIgnoreRules(env: ExecutionEnv, ig: IgnoreMatcher, dir: string, rootDir: string): Promise<void> {
+	const relativeDir = relative(rootDir, dir);
+	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
+
+	const patternGroups = await Promise.all(
+		IGNORE_FILE_NAMES.map(async (filename) => {
+			const ignorePath = await envJoin(env, [dir, filename]);
+			const content = await env.readTextFile(ignorePath);
+
+			if (!content.ok) return [];
+			return content.value
+				.split(/\r?\n/)
+				.map((line) => prefixIgnorePattern(line, prefix))
+				.filter((line): line is string => Boolean(line));
+		}),
+	);
+	for (const patterns of patternGroups) {
+		if (patterns.length > 0) {
+			ig.add(patterns);
+		}
+	}
+}
+
+async function collectEnvSkillEntries(
+	env: ExecutionEnv,
+	dir: string,
+	mode: SkillDiscoveryMode,
+	rootDir = dir,
+	ignoreMatcher?: IgnoreMatcher,
+): Promise<string[]> {
+	const entries: string[] = [];
+	const dirEntries = await env.listDir(dir);
+	if (!dirEntries.ok) return entries;
+
+	const ig = ignoreMatcher ?? ignore();
+	await addEnvIgnoreRules(env, ig, dir, rootDir);
+
+	const skillFile = dirEntries.value.find((entry) => entry.name === "SKILL.md" && entry.kind === "file");
+	if (skillFile) {
+		const relPath = toPosixPath(relative(rootDir, skillFile.path));
+		return ig.ignores(relPath) ? [] : [skillFile.path];
+	}
+
+	const childResults = await Promise.all(
+		dirEntries.value.map(async (entry) => {
+			if (entry.name.startsWith(".") || entry.name === "node_modules") return [];
+			const relPath = toPosixPath(relative(rootDir, entry.path));
+			const ignorePath = entry.kind === "directory" ? `${relPath}/` : relPath;
+			if (ig.ignores(ignorePath)) return [];
+			if (mode === "pi" && dir === rootDir && entry.kind === "file" && entry.name.endsWith(".md")) {
+				return [entry.path];
+			}
+			if (entry.kind === "directory") {
+				return await collectEnvSkillEntries(env, entry.path, mode, rootDir, ig);
+			}
+			return [];
+		}),
+	);
+	for (const childEntries of childResults) {
+		entries.push(...childEntries);
+	}
+	return entries;
+}
+
+async function collectEnvTopLevelEntries(env: ExecutionEnv, dir: string, suffix: string): Promise<string[]> {
+	const entries: string[] = [];
+	const dirEntries = await env.listDir(dir);
+	if (!dirEntries.ok) return entries;
+	const ig = ignore();
+	await addEnvIgnoreRules(env, ig, dir, dir);
+	for (const entry of dirEntries.value) {
+		if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+		const relPath = toPosixPath(relative(dir, entry.path));
+		if (ig.ignores(relPath)) continue;
+		if (entry.kind === "file" && entry.name.endsWith(suffix)) {
+			entries.push(entry.path);
+		}
+	}
+	return entries;
+}
+
+async function findEnvGitRepoRoot(env: ExecutionEnv, startDir: string): Promise<string | null> {
+	let dir = startDir;
+	while (true) {
+		const gitInfo = await env.fileInfo(await envJoin(env, [dir, ".git"]));
+		if (gitInfo.ok) return dir;
+		const parent = dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+async function collectAncestorEnvAgentsSkillDirs(env: ExecutionEnv, startDir: string): Promise<string[]> {
+	const skillDirs: string[] = [];
+	const gitRepoRoot = await findEnvGitRepoRoot(env, startDir);
+	let dir = startDir;
+	while (true) {
+		skillDirs.push(await envJoin(env, [dir, ".agents", "skills"]));
+		if (gitRepoRoot && dir === gitRepoRoot) break;
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return skillDirs;
+}
+
 /**
  * Collect resource files from a directory based on resource type.
  * Extensions use smart discovery (index.ts in subdirs), others use recursive collection.
@@ -765,6 +844,7 @@ export class DefaultPackageManager implements PackageManager {
 	private cwd: string;
 	private agentDir: string;
 	private settingsManager: SettingsManager;
+	private executionEnv: ExecutionEnv;
 	private globalNpmRoot: string | undefined;
 	private globalNpmRootCommandKey: string | undefined;
 	private progressCallback: ProgressCallback | undefined;
@@ -773,6 +853,7 @@ export class DefaultPackageManager implements PackageManager {
 		this.cwd = resolvePath(options.cwd);
 		this.agentDir = resolvePath(options.agentDir);
 		this.settingsManager = options.settingsManager;
+		this.executionEnv = options.executionEnv ?? new NodeExecutionEnv({ cwd: this.cwd });
 	}
 
 	setProgressCallback(callback: ProgressCallback | undefined): void {
@@ -892,7 +973,7 @@ export class DefaultPackageManager implements PackageManager {
 			const target = this.getTargetMap(accumulator, resourceType);
 			const globalEntries = (globalSettings[resourceType] ?? []) as string[];
 			const projectEntries = (projectSettings[resourceType] ?? []) as string[];
-			this.resolveLocalEntries(
+			await this.resolveEnvEntries(
 				projectEntries,
 				resourceType,
 				target,
@@ -916,7 +997,13 @@ export class DefaultPackageManager implements PackageManager {
 			);
 		}
 
-		this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
+		await this.addAutoDiscoveredResources(
+			accumulator,
+			globalSettings,
+			projectSettings,
+			globalBaseDir,
+			projectBaseDir,
+		);
 
 		return this.toResolvedPaths(accumulator);
 	}
@@ -2211,13 +2298,38 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private addAutoDiscoveredResources(
+	private async resolveEnvEntries(
+		entries: string[],
+		resourceType: ResourceType,
+		target: Map<string, { metadata: PathMetadata; enabled: boolean }>,
+		metadata: PathMetadata,
+		baseDir: string,
+	): Promise<void> {
+		if (entries.length === 0) return;
+
+		const { plain, patterns } = splitPatterns(entries);
+		const resolvedPlain: string[] = [];
+		for (const p of plain) {
+			const joined = await envJoin(this.executionEnv, [baseDir, p]);
+			const resolved = await this.executionEnv.absolutePath(p.startsWith("/") ? p : joined);
+			resolvedPlain.push(resolved.ok ? resolved.value : joined);
+		}
+
+		const allFiles = await this.collectEnvFilesFromPaths(resolvedPlain, resourceType);
+		const enabledPaths = applyPatterns(allFiles, patterns, baseDir);
+
+		for (const f of allFiles) {
+			this.addResource(target, f, metadata, enabledPaths.has(f));
+		}
+	}
+
+	private async addAutoDiscoveredResources(
 		accumulator: ResourceAccumulator,
 		globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>,
 		projectSettings: ReturnType<SettingsManager["getProjectSettings"]>,
 		globalBaseDir: string,
 		projectBaseDir: string,
-	): void {
+	): Promise<void> {
 		const userMetadata: PathMetadata = {
 			source: "auto",
 			scope: "user",
@@ -2257,7 +2369,7 @@ export class DefaultPackageManager implements PackageManager {
 			themes: join(projectBaseDir, "themes"),
 		};
 		const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
-		const projectAgentsSkillDirs = collectAncestorAgentsSkillDirs(this.cwd).filter(
+		const projectAgentsSkillDirs = (await collectAncestorEnvAgentsSkillDirs(this.executionEnv, this.cwd)).filter(
 			(dir) => resolve(dir) !== resolve(userAgentsSkillsDir),
 		);
 
@@ -2284,45 +2396,33 @@ export class DefaultPackageManager implements PackageManager {
 			projectBaseDir,
 		);
 
+		const [projectSkills, projectPrompts, projectThemes, projectAgentsSkills] = await Promise.all([
+			collectEnvSkillEntries(this.executionEnv, projectDirs.skills, "pi"),
+			collectEnvTopLevelEntries(this.executionEnv, projectDirs.prompts, ".md"),
+			collectEnvTopLevelEntries(this.executionEnv, projectDirs.themes, ".json"),
+			Promise.all(
+				projectAgentsSkillDirs.map(async (agentsSkillsDir) => ({
+					agentsSkillsDir,
+					skills: await collectEnvSkillEntries(this.executionEnv, agentsSkillsDir, "agents"),
+				})),
+			),
+		]);
+
 		// Project skills from .pi/
-		addResources(
-			"skills",
-			collectAutoSkillEntries(projectDirs.skills, "pi"),
-			projectMetadata,
-			projectOverrides.skills,
-			projectBaseDir,
-		);
+		addResources("skills", projectSkills, projectMetadata, projectOverrides.skills, projectBaseDir);
 
 		// Project skills from .agents/ (each with its own baseDir)
-		for (const agentsSkillsDir of projectAgentsSkillDirs) {
+		for (const { agentsSkillsDir, skills } of projectAgentsSkills) {
 			const agentsBaseDir = dirname(agentsSkillsDir); // the .agents directory
 			const agentsMetadata: PathMetadata = {
 				...projectMetadata,
 				baseDir: agentsBaseDir,
 			};
-			addResources(
-				"skills",
-				collectAutoSkillEntries(agentsSkillsDir, "agents"),
-				agentsMetadata,
-				projectOverrides.skills,
-				agentsBaseDir,
-			);
+			addResources("skills", skills, agentsMetadata, projectOverrides.skills, agentsBaseDir);
 		}
 
-		addResources(
-			"prompts",
-			collectAutoPromptEntries(projectDirs.prompts),
-			projectMetadata,
-			projectOverrides.prompts,
-			projectBaseDir,
-		);
-		addResources(
-			"themes",
-			collectAutoThemeEntries(projectDirs.themes),
-			projectMetadata,
-			projectOverrides.themes,
-			projectBaseDir,
-		);
+		addResources("prompts", projectPrompts, projectMetadata, projectOverrides.prompts, projectBaseDir);
+		addResources("themes", projectThemes, projectMetadata, projectOverrides.themes, projectBaseDir);
 
 		// User extensions from ~/.pi/agent/
 		addResources(
@@ -2386,6 +2486,28 @@ export class DefaultPackageManager implements PackageManager {
 				}
 			} catch {
 				// Ignore errors
+			}
+		}
+		return files;
+	}
+
+	private async collectEnvFilesFromPaths(paths: string[], resourceType: ResourceType): Promise<string[]> {
+		const files: string[] = [];
+		for (const p of paths) {
+			const info = await this.executionEnv.fileInfo(p);
+			if (!info.ok) continue;
+			if (info.value.kind === "file") {
+				files.push(p);
+			} else if (info.value.kind === "directory") {
+				if (resourceType === "extensions") {
+					files.push(...collectAutoExtensionEntries(p));
+				} else if (resourceType === "skills") {
+					files.push(...(await collectEnvSkillEntries(this.executionEnv, p, "pi")));
+				} else if (resourceType === "prompts") {
+					files.push(...(await collectEnvTopLevelEntries(this.executionEnv, p, ".md")));
+				} else if (resourceType === "themes") {
+					files.push(...(await collectEnvTopLevelEntries(this.executionEnv, p, ".json")));
+				}
 			}
 		}
 		return files;

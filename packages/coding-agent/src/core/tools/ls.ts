@@ -44,6 +44,10 @@ const defaultLsOperations: LsOperations = {
 	readdir: fsReaddir,
 };
 
+function isNotFoundError(error: unknown): boolean {
+	return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
 export interface LsToolOptions {
 	/** Custom operations for directory listing. Default: local filesystem */
 	operations?: LsOperations;
@@ -124,14 +128,18 @@ export function createLsToolDefinition(
 						const dirPath = resolveToCwd(path || ".", cwd);
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
-						// Check if path exists.
-						if (!(await ops.exists(dirPath))) {
-							reject(new Error(`Path not found: ${dirPath}`));
+						// Check if path is a directory.
+						let stat: { isDirectory: () => boolean };
+						try {
+							stat = await ops.stat(dirPath);
+						} catch (error) {
+							if (isNotFoundError(error)) {
+								reject(new Error(`Path not found: ${dirPath}`));
+								return;
+							}
+							reject(error);
 							return;
 						}
-
-						// Check if path is a directory.
-						const stat = await ops.stat(dirPath);
 						if (!stat.isDirectory()) {
 							reject(new Error(`Not a directory: ${dirPath}`));
 							return;

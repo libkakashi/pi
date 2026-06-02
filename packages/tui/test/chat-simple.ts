@@ -3,6 +3,7 @@
  */
 
 import chalk from "chalk";
+import { NodeExecutionEnv } from "../../agent/src/harness/env/nodejs.ts";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 import { Editor } from "../src/components/editor.ts";
 import { Loader } from "../src/components/loader.ts";
@@ -33,6 +34,7 @@ const autocompleteProvider = new CombinedAutocompleteProvider(
 		{ name: "clear", description: "Clear all messages" },
 	],
 	process.cwd(),
+	new NodeExecutionEnv({ cwd: process.cwd() }),
 );
 editor.setAutocompleteProvider(autocompleteProvider);
 

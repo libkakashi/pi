@@ -1,26 +1,26 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
-import { basename, dirname, join, resolve, sep } from "path";
+import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
+import { basename, dirname } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
-import { resolvePath } from "../utils/paths.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
-/**
- * Represents a prompt template loaded from a markdown file
- */
 export interface PromptTemplate {
 	name: string;
 	description: string;
 	argumentHint?: string;
 	content: string;
 	sourceInfo: SourceInfo;
-	filePath: string; // Absolute path to the template file
+	filePath: string;
 }
 
-/**
- * Parse command arguments respecting quoted strings (bash-style)
- * Returns array of arguments
- */
+export interface LoadPromptTemplatesOptions {
+	cwd: string;
+	agentDir: string;
+	promptPaths: string[];
+	includeDefaults: boolean;
+	executionEnv: ExecutionEnv;
+}
+
 export function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
 	let current = "";
@@ -54,32 +54,16 @@ export function parseCommandArgs(argsString: string): string[] {
 	return args;
 }
 
-/**
- * Substitute argument placeholders in template content
- * Supports:
- * - $1, $2, ... for positional args
- * - $@ and $ARGUMENTS for all args
- * - ${@:N} for args from Nth onwards (bash-style slicing)
- * - ${@:N:L} for L args starting from Nth
- *
- * Note: Replacement happens on the template string only. Argument values
- * containing patterns like $1, $@, or $ARGUMENTS are NOT recursively substituted.
- */
 export function substituteArgs(content: string, args: string[]): string {
 	let result = content;
 
-	// Replace $1, $2, etc. with positional args FIRST (before wildcards)
-	// This prevents wildcard replacement values containing $<digit> patterns from being re-substituted
 	result = result.replace(/\$(\d+)/g, (_, num) => {
 		const index = parseInt(num, 10) - 1;
 		return args[index] ?? "";
 	});
 
-	// Replace ${@:start} or ${@:start:length} with sliced args (bash-style)
-	// Process BEFORE simple $@ to avoid conflicts
 	result = result.replace(/\$\{@:(\d+)(?::(\d+))?\}/g, (_, startStr, lengthStr) => {
-		let start = parseInt(startStr, 10) - 1; // Convert to 0-indexed (user provides 1-indexed)
-		// Treat 0 as 1 (bash convention: args start at 1)
+		let start = parseInt(startStr, 10) - 1;
 		if (start < 0) start = 0;
 
 		if (lengthStr) {
@@ -89,31 +73,47 @@ export function substituteArgs(content: string, args: string[]): string {
 		return args.slice(start).join(" ");
 	});
 
-	// Pre-compute all args joined (optimization)
 	const allArgs = args.join(" ");
-
-	// Replace $ARGUMENTS with all args joined (new syntax, aligns with Claude, Codex, OpenCode)
 	result = result.replace(/\$ARGUMENTS/g, allArgs);
-
-	// Replace $@ with all args joined (existing syntax)
 	result = result.replace(/\$@/g, allArgs);
 
 	return result;
 }
 
-function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptTemplate | null {
-	try {
-		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(rawContent);
+async function envJoin(env: ExecutionEnv, parts: string[]): Promise<string> {
+	const joined = await env.joinPath(parts);
+	return joined.ok ? joined.value : parts.join("/");
+}
 
+async function resolveEnvPath(env: ExecutionEnv, path: string): Promise<string> {
+	const resolved = await env.absolutePath(path);
+	return resolved.ok ? resolved.value : path;
+}
+
+function isUnderEnvPath(target: string, root: string): boolean {
+	if (target === root) return true;
+	const prefix = root.endsWith("/") ? root : `${root}/`;
+	return target.startsWith(prefix);
+}
+
+async function loadTemplateFromFile(
+	env: ExecutionEnv,
+	filePath: string,
+	sourceInfo: SourceInfo,
+): Promise<PromptTemplate | null> {
+	const rawContent = await env.readTextFile(filePath);
+	if (!rawContent.ok) {
+		return null;
+	}
+
+	try {
+		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(rawContent.value);
 		const name = basename(filePath).replace(/\.md$/, "");
 
-		// Get description from frontmatter or first non-empty line
 		let description = frontmatter.description || "";
 		if (!description) {
 			const firstLine = body.split("\n").find((line) => line.trim());
 			if (firstLine) {
-				// Truncate if too long
 				description = firstLine.slice(0, 60);
 				if (firstLine.length > 60) description += "...";
 			}
@@ -132,94 +132,49 @@ function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptT
 	}
 }
 
-/**
- * Scan a directory for .md files (non-recursive) and load them as prompt templates.
- */
-function loadTemplatesFromDir(dir: string, getSourceInfo: (filePath: string) => SourceInfo): PromptTemplate[] {
+async function loadTemplatesFromDir(
+	env: ExecutionEnv,
+	dir: string,
+	getSourceInfo: (filePath: string) => SourceInfo,
+): Promise<PromptTemplate[]> {
 	const templates: PromptTemplate[] = [];
-
-	if (!existsSync(dir)) {
+	const entries = await env.listDir(dir);
+	if (!entries.ok) {
 		return templates;
 	}
 
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			const fullPath = join(dir, entry.name);
-
-			// For symlinks, check if they point to a file
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isFile = stats.isFile();
-				} catch {
-					// Broken symlink, skip it
-					continue;
-				}
-			}
-
-			if (isFile && entry.name.endsWith(".md")) {
-				const template = loadTemplateFromFile(fullPath, getSourceInfo(fullPath));
-				if (template) {
-					templates.push(template);
-				}
-			}
+	const loaded = await Promise.all(
+		entries.value.map(async (entry) => {
+			if (entry.kind !== "file" || !entry.name.endsWith(".md")) return null;
+			return await loadTemplateFromFile(env, entry.path, getSourceInfo(entry.path));
+		}),
+	);
+	for (const template of loaded) {
+		if (template) {
+			templates.push(template);
 		}
-	} catch {
-		return templates;
 	}
 
 	return templates;
 }
 
-export interface LoadPromptTemplatesOptions {
-	/** Working directory for project-local templates. */
-	cwd: string;
-	/** Agent config directory for global templates. */
-	agentDir: string;
-	/** Explicit prompt template paths (files or directories). */
-	promptPaths: string[];
-	/** Include default prompt directories. */
-	includeDefaults: boolean;
-}
-
-/**
- * Load all prompt templates from:
- * 1. Global: agentDir/prompts/
- * 2. Project: cwd/{CONFIG_DIR_NAME}/prompts/
- * 3. Explicit prompt paths
- */
-export function loadPromptTemplates(options: LoadPromptTemplatesOptions): PromptTemplate[] {
-	const resolvedCwd = resolvePath(options.cwd);
-	const resolvedAgentDir = resolvePath(options.agentDir);
-	const promptPaths = options.promptPaths;
-	const includeDefaults = options.includeDefaults;
-
+export async function loadPromptTemplates(options: LoadPromptTemplatesOptions): Promise<PromptTemplate[]> {
+	const env = options.executionEnv;
+	const resolvedCwd = await resolveEnvPath(env, options.cwd);
+	const resolvedAgentDir = await resolveEnvPath(env, options.agentDir);
 	const templates: PromptTemplate[] = [];
-
-	const globalPromptsDir = join(resolvedAgentDir, "prompts");
-	const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
-
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
+	const globalPromptsDir = await envJoin(env, [resolvedAgentDir, "prompts"]);
+	const projectPromptsDir = await envJoin(env, [resolvedCwd, CONFIG_DIR_NAME, "prompts"]);
 
 	const getSourceInfo = (resolvedPath: string): SourceInfo => {
-		if (isUnderPath(resolvedPath, globalPromptsDir)) {
+		if (isUnderEnvPath(resolvedPath, globalPromptsDir)) {
 			return createSyntheticSourceInfo(resolvedPath, {
 				source: "local",
 				scope: "user",
 				baseDir: globalPromptsDir,
 			});
 		}
-		if (isUnderPath(resolvedPath, projectPromptsDir)) {
+		if (isUnderEnvPath(resolvedPath, projectPromptsDir)) {
 			return createSyntheticSourceInfo(resolvedPath, {
 				source: "local",
 				scope: "project",
@@ -228,44 +183,41 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 		}
 		return createSyntheticSourceInfo(resolvedPath, {
 			source: "local",
-			baseDir: statSync(resolvedPath).isDirectory() ? resolvedPath : dirname(resolvedPath),
+			baseDir: dirname(resolvedPath),
 		});
 	};
 
-	if (includeDefaults) {
-		templates.push(...loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
-		templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
+	if (options.includeDefaults) {
+		const [globalTemplates, projectTemplates] = await Promise.all([
+			loadTemplatesFromDir(env, globalPromptsDir, getSourceInfo),
+			loadTemplatesFromDir(env, projectPromptsDir, getSourceInfo),
+		]);
+		templates.push(...globalTemplates, ...projectTemplates);
 	}
 
-	// 3. Load explicit prompt paths
-	for (const rawPath of promptPaths) {
-		const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
-		if (!existsSync(resolvedPath)) {
-			continue;
-		}
-
-		try {
-			const stats = statSync(resolvedPath);
-			if (stats.isDirectory()) {
-				templates.push(...loadTemplatesFromDir(resolvedPath, getSourceInfo));
-			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
-				const template = loadTemplateFromFile(resolvedPath, getSourceInfo(resolvedPath));
+	const pathTemplates = await Promise.all(
+		options.promptPaths.map(async (rawPath) => {
+			const resolvedPath = await resolveEnvPath(env, rawPath);
+			const info = await env.fileInfo(resolvedPath);
+			if (!info.ok) return [];
+			if (info.value.kind === "directory") {
+				return await loadTemplatesFromDir(env, resolvedPath, getSourceInfo);
+			} else if (info.value.kind === "file" && resolvedPath.endsWith(".md")) {
+				const template = await loadTemplateFromFile(env, resolvedPath, getSourceInfo(resolvedPath));
 				if (template) {
-					templates.push(template);
+					return [template];
 				}
 			}
-		} catch {
-			// Ignore read failures
-		}
+			return [];
+		}),
+	);
+	for (const pathResult of pathTemplates) {
+		templates.push(...pathResult);
 	}
 
 	return templates;
 }
 
-/**
- * Expand a prompt template if it matches a template name.
- * Returns the expanded content or the original text if not a template.
- */
 export function expandPromptTemplate(text: string, templates: PromptTemplate[]): string {
 	if (!text.startsWith("/")) return text;
 
@@ -274,12 +226,9 @@ export function expandPromptTemplate(text: string, templates: PromptTemplate[]):
 
 	const templateName = match[1];
 	const argsString = match[2] ?? "";
-
 	const template = templates.find((t) => t.name === templateName);
-	if (template) {
-		const args = parseCommandArgs(argsString);
-		return substituteArgs(template.content, args);
-	}
+	if (!template) return text;
 
-	return text;
+	const args = parseCommandArgs(argsString);
+	return substituteArgs(template.content, args);
 }
