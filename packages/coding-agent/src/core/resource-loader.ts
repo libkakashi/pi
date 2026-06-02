@@ -125,8 +125,10 @@ export async function loadProjectContextFiles(options: {
 	agentDir: string;
 	executionEnv: ExecutionEnv;
 }): Promise<Array<{ path: string; content: string }>> {
-	const resolvedCwd = await options.executionEnv.absolutePath(options.cwd);
-	const resolvedAgentDir = await options.executionEnv.absolutePath(options.agentDir);
+	const [resolvedCwd, resolvedAgentDir] = await Promise.all([
+		options.executionEnv.absolutePath(options.cwd),
+		options.executionEnv.absolutePath(options.agentDir),
+	]);
 	const contextFiles: Array<{ path: string; content: string }> = [];
 	const seenPaths = new Set<string>();
 
@@ -825,9 +827,17 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const diagnostics: ResourceDiagnostic[] = [];
 		if (includeDefaults) {
 			const defaultDirs = [join(this.agentDir, "themes"), join(this.cwd, CONFIG_DIR_NAME, "themes")];
-
-			for (const dir of defaultDirs) {
-				await this.loadThemesFromDir(dir, themes, diagnostics);
+			const defaultResults = await Promise.all(
+				defaultDirs.map(async (dir) => {
+					const themes: Theme[] = [];
+					const diagnostics: ResourceDiagnostic[] = [];
+					await this.loadThemesFromDir(dir, themes, diagnostics);
+					return { themes, diagnostics };
+				}),
+			);
+			for (const result of defaultResults) {
+				themes.push(...result.themes);
+				diagnostics.push(...result.diagnostics);
 			}
 		}
 

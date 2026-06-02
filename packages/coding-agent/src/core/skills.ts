@@ -365,10 +365,14 @@ export interface LoadSkillsOptions {
 
 export async function loadSkills(options: LoadSkillsOptions): Promise<LoadSkillsResult> {
 	const env = options.executionEnv;
-	const resolvedCwd = await resolveEnvPath(env, options.cwd);
-	const resolvedAgentDir = await resolveEnvPath(env, options.agentDir ?? getAgentDir());
-	const userSkillsDir = await envJoin(env, [resolvedAgentDir, "skills"]);
-	const projectSkillsDir = await envJoin(env, [resolvedCwd, CONFIG_DIR_NAME, "skills"]);
+	const [resolvedCwd, resolvedAgentDir] = await Promise.all([
+		resolveEnvPath(env, options.cwd),
+		resolveEnvPath(env, options.agentDir ?? getAgentDir()),
+	]);
+	const [userSkillsDir, projectSkillsDir] = await Promise.all([
+		envJoin(env, [resolvedAgentDir, "skills"]),
+		envJoin(env, [resolvedCwd, CONFIG_DIR_NAME, "skills"]),
+	]);
 	const skillMap = new Map<string, Skill>();
 	const pathSet = new Set<string>();
 	const allDiagnostics: ResourceDiagnostic[] = [];

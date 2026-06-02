@@ -160,11 +160,15 @@ async function loadTemplatesFromDir(
 
 export async function loadPromptTemplates(options: LoadPromptTemplatesOptions): Promise<PromptTemplate[]> {
 	const env = options.executionEnv;
-	const resolvedCwd = await resolveEnvPath(env, options.cwd);
-	const resolvedAgentDir = await resolveEnvPath(env, options.agentDir);
+	const [resolvedCwd, resolvedAgentDir] = await Promise.all([
+		resolveEnvPath(env, options.cwd),
+		resolveEnvPath(env, options.agentDir),
+	]);
 	const templates: PromptTemplate[] = [];
-	const globalPromptsDir = await envJoin(env, [resolvedAgentDir, "prompts"]);
-	const projectPromptsDir = await envJoin(env, [resolvedCwd, CONFIG_DIR_NAME, "prompts"]);
+	const [globalPromptsDir, projectPromptsDir] = await Promise.all([
+		envJoin(env, [resolvedAgentDir, "prompts"]),
+		envJoin(env, [resolvedCwd, CONFIG_DIR_NAME, "prompts"]),
+	]);
 
 	const getSourceInfo = (resolvedPath: string): SourceInfo => {
 		if (isUnderEnvPath(resolvedPath, globalPromptsDir)) {

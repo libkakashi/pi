@@ -33,30 +33,46 @@ export async function loadPromptTemplates(
 ): Promise<{ promptTemplates: PromptTemplate[]; diagnostics: PromptTemplateDiagnostic[] }> {
 	const promptTemplates: PromptTemplate[] = [];
 	const diagnostics: PromptTemplateDiagnostic[] = [];
-	for (const path of Array.isArray(paths) ? paths : [paths]) {
-		const infoResult = await env.fileInfo(path);
-		if (!infoResult.ok) {
-			if (infoResult.error.code !== "not_found") {
-				diagnostics.push({
-					type: "warning",
-					code: "file_info_failed",
-					message: infoResult.error.message,
-					path,
-				});
+
+	const results = await Promise.all(
+		(Array.isArray(paths) ? paths : [paths]).map(async (path) => {
+			const promptTemplates: PromptTemplate[] = [];
+			const diagnostics: PromptTemplateDiagnostic[] = [];
+
+			const infoResult = await env.fileInfo(path);
+
+			if (!infoResult.ok) {
+				if (infoResult.error.code !== "not_found") {
+					diagnostics.push({
+						type: "warning",
+						code: "file_info_failed",
+						message: infoResult.error.message,
+						path,
+					});
+				}
+				return { promptTemplates, diagnostics };
 			}
-			continue;
-		}
-		const info = infoResult.value;
-		const kind = await resolveKind(env, info, diagnostics);
-		if (kind === "directory") {
-			const result = await loadTemplatesFromDir(env, info.path);
-			promptTemplates.push(...result.promptTemplates);
-			diagnostics.push(...result.diagnostics);
-		} else if (kind === "file" && info.name.endsWith(".md")) {
-			const result = await loadTemplateFromFile(env, info.path);
-			if (result.promptTemplate) promptTemplates.push(result.promptTemplate);
-			diagnostics.push(...result.diagnostics);
-		}
+			const info = infoResult.value;
+			const kind = await resolveKind(env, info, diagnostics);
+
+			if (kind === "directory") {
+				const result = await loadTemplatesFromDir(env, info.path);
+				promptTemplates.push(...result.promptTemplates);
+				diagnostics.push(...result.diagnostics);
+			} else if (kind === "file" && info.name.endsWith(".md")) {
+				const result = await loadTemplateFromFile(env, info.path);
+
+				if (result.promptTemplate) {
+					promptTemplates.push(result.promptTemplate);
+				}
+				diagnostics.push(...result.diagnostics);
+			}
+			return { promptTemplates, diagnostics };
+		}),
+	);
+	for (const result of results) {
+		promptTemplates.push(...result.promptTemplates);
+		diagnostics.push(...result.diagnostics);
 	}
 	return { promptTemplates, diagnostics };
 }
@@ -77,8 +93,14 @@ export async function loadSourcedPromptTemplates<TSource, TPromptTemplate extend
 }> {
 	const promptTemplates: Array<{ promptTemplate: TPromptTemplate; source: TSource }> = [];
 	const diagnostics: Array<PromptTemplateDiagnostic & { source: TSource }> = [];
-	for (const input of inputs) {
-		const result = await loadPromptTemplates(env, input.path);
+
+	const results = await Promise.all(
+		inputs.map(async (input) => {
+			const result = await loadPromptTemplates(env, input.path);
+			return { input, result };
+		}),
+	);
+	for (const { input, result } of results) {
 		for (const promptTemplate of result.promptTemplates) {
 			promptTemplates.push({
 				promptTemplate: mapPromptTemplate
@@ -87,7 +109,9 @@ export async function loadSourcedPromptTemplates<TSource, TPromptTemplate extend
 				source: input.source,
 			});
 		}
-		for (const diagnostic of result.diagnostics) diagnostics.push({ ...diagnostic, source: input.source });
+		for (const diagnostic of result.diagnostics) {
+			diagnostics.push({ ...diagnostic, source: input.source });
+		}
 	}
 	return { promptTemplates, diagnostics };
 }
@@ -110,10 +134,25 @@ async function loadTemplatesFromDir(
 	}
 	const entries = entriesResult.value;
 
-	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		const kind = await resolveKind(env, entry, diagnostics);
-		if (kind !== "file" || !entry.name.endsWith(".md")) continue;
-		const result = await loadTemplateFromFile(env, entry.path);
+	const loaded = await Promise.all(
+		entries
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map(async (entry) => {
+				const diagnostics: PromptTemplateDiagnostic[] = [];
+				const kind = await resolveKind(env, entry, diagnostics);
+
+				if (kind !== "file" || !entry.name.endsWith(".md")) {
+					return { diagnostics };
+				}
+				const result = await loadTemplateFromFile(env, entry.path);
+
+				return {
+					promptTemplate: result.promptTemplate,
+					diagnostics: [...diagnostics, ...result.diagnostics],
+				};
+			}),
+	);
+	for (const result of loaded) {
 		if (result.promptTemplate) promptTemplates.push(result.promptTemplate);
 		diagnostics.push(...result.diagnostics);
 	}

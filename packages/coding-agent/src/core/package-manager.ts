@@ -1,7 +1,7 @@
 import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
 
@@ -2308,12 +2308,13 @@ export class DefaultPackageManager implements PackageManager {
 		if (entries.length === 0) return;
 
 		const { plain, patterns } = splitPatterns(entries);
-		const resolvedPlain: string[] = [];
-		for (const p of plain) {
-			const joined = await envJoin(this.executionEnv, [baseDir, p]);
-			const resolved = await this.executionEnv.absolutePath(p.startsWith("/") ? p : joined);
-			resolvedPlain.push(resolved.ok ? resolved.value : joined);
-		}
+		const resolvedPlain = await Promise.all(
+			plain.map(async (p) => {
+				const joined = await envJoin(this.executionEnv, [baseDir, p]);
+				const resolved = await this.executionEnv.absolutePath(p.startsWith("/") ? p : joined);
+				return resolved.ok ? resolved.value : joined;
+			}),
+		);
 
 		const allFiles = await this.collectEnvFilesFromPaths(resolvedPlain, resourceType);
 		const enabledPaths = applyPatterns(allFiles, patterns, baseDir);
@@ -2492,25 +2493,32 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async collectEnvFilesFromPaths(paths: string[], resourceType: ResourceType): Promise<string[]> {
-		const files: string[] = [];
-		for (const p of paths) {
-			const info = await this.executionEnv.fileInfo(p);
-			if (!info.ok) continue;
-			if (info.value.kind === "file") {
-				files.push(p);
-			} else if (info.value.kind === "directory") {
-				if (resourceType === "extensions") {
-					files.push(...collectAutoExtensionEntries(p));
-				} else if (resourceType === "skills") {
-					files.push(...(await collectEnvSkillEntries(this.executionEnv, p, "pi")));
-				} else if (resourceType === "prompts") {
-					files.push(...(await collectEnvTopLevelEntries(this.executionEnv, p, ".md")));
-				} else if (resourceType === "themes") {
-					files.push(...(await collectEnvTopLevelEntries(this.executionEnv, p, ".json")));
+		const fileGroups = await Promise.all(
+			paths.map(async (p) => {
+				const info = await this.executionEnv.fileInfo(p);
+				if (!info.ok) return [];
+
+				if (info.value.kind === "file") {
+					return [p];
 				}
-			}
-		}
-		return files;
+				if (info.value.kind !== "directory") return [];
+
+				if (resourceType === "extensions") {
+					return collectAutoExtensionEntries(p);
+				}
+				if (resourceType === "skills") {
+					return await collectEnvSkillEntries(this.executionEnv, p, "pi");
+				}
+				if (resourceType === "prompts") {
+					return await collectEnvTopLevelEntries(this.executionEnv, p, ".md");
+				}
+				if (resourceType === "themes") {
+					return await collectEnvTopLevelEntries(this.executionEnv, p, ".json");
+				}
+				return [];
+			}),
+		);
+		return fileGroups.flat();
 	}
 
 	private getTargetMap(

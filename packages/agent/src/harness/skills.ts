@@ -52,22 +52,37 @@ export async function loadSkills(
 ): Promise<{ skills: Skill[]; diagnostics: SkillDiagnostic[] }> {
 	const skills: Skill[] = [];
 	const diagnostics: SkillDiagnostic[] = [];
-	for (const dir of Array.isArray(dirs) ? dirs : [dirs]) {
-		const rootInfoResult = await env.fileInfo(dir);
-		if (!rootInfoResult.ok) {
-			if (rootInfoResult.error.code !== "not_found") {
-				diagnostics.push({
-					type: "warning",
-					code: "file_info_failed",
-					message: rootInfoResult.error.message,
-					path: dir,
-				});
+
+	const results = await Promise.all(
+		(Array.isArray(dirs) ? dirs : [dirs]).map(async (dir) => {
+			const skills: Skill[] = [];
+			const diagnostics: SkillDiagnostic[] = [];
+			const rootInfoResult = await env.fileInfo(dir);
+
+			if (!rootInfoResult.ok) {
+				if (rootInfoResult.error.code !== "not_found") {
+					diagnostics.push({
+						type: "warning",
+						code: "file_info_failed",
+						message: rootInfoResult.error.message,
+						path: dir,
+					});
+				}
+				return { skills, diagnostics };
 			}
-			continue;
-		}
-		const rootInfo = rootInfoResult.value;
-		if ((await resolveKind(env, rootInfo, diagnostics)) !== "directory") continue;
-		const result = await loadSkillsFromDirInternal(env, rootInfo.path, true, ignore(), rootInfo.path);
+			const rootInfo = rootInfoResult.value;
+
+			if ((await resolveKind(env, rootInfo, diagnostics)) !== "directory") {
+				return { skills, diagnostics };
+			}
+			const result = await loadSkillsFromDirInternal(env, rootInfo.path, true, ignore(), rootInfo.path);
+			skills.push(...result.skills);
+			diagnostics.push(...result.diagnostics);
+
+			return { skills, diagnostics };
+		}),
+	);
+	for (const result of results) {
 		skills.push(...result.skills);
 		diagnostics.push(...result.diagnostics);
 	}
@@ -90,12 +105,23 @@ export async function loadSourcedSkills<TSource, TSkill extends Skill = Skill>(
 }> {
 	const skills: Array<{ skill: TSkill; source: TSource }> = [];
 	const diagnostics: Array<SkillDiagnostic & { source: TSource }> = [];
-	for (const input of inputs) {
-		const result = await loadSkills(env, input.path);
+
+	const results = await Promise.all(
+		inputs.map(async (input) => {
+			const result = await loadSkills(env, input.path);
+			return { input, result };
+		}),
+	);
+	for (const { input, result } of results) {
 		for (const skill of result.skills) {
-			skills.push({ skill: mapSkill ? mapSkill(skill, input.source) : (skill as TSkill), source: input.source });
+			skills.push({
+				skill: mapSkill ? mapSkill(skill, input.source) : (skill as TSkill),
+				source: input.source,
+			});
 		}
-		for (const diagnostic of result.diagnostics) diagnostics.push({ ...diagnostic, source: input.source });
+		for (const diagnostic of result.diagnostics) {
+			diagnostics.push({ ...diagnostic, source: input.source });
+		}
 	}
 	return { skills, diagnostics };
 }
@@ -184,30 +210,41 @@ async function addIgnoreRules(
 	const relativeDir = relativeEnvPath(rootDir, dir);
 	const prefix = relativeDir ? `${relativeDir}/` : "";
 
-	for (const filename of IGNORE_FILE_NAMES) {
-		const ignorePath = joinEnvPath(dir, filename);
-		const info = await env.fileInfo(ignorePath);
-		if (!info.ok) {
-			if (info.error.code !== "not_found") {
+	const patternGroups = await Promise.all(
+		IGNORE_FILE_NAMES.map(async (filename) => {
+			const ignorePath = joinEnvPath(dir, filename);
+			const info = await env.fileInfo(ignorePath);
+
+			if (!info.ok) {
+				if (info.error.code !== "not_found") {
+					diagnostics.push({
+						type: "warning",
+						code: "file_info_failed",
+						message: info.error.message,
+						path: ignorePath,
+					});
+				}
+				return [];
+			}
+			if (info.value.kind !== "file") return [];
+			const content = await env.readTextFile(ignorePath);
+
+			if (!content.ok) {
 				diagnostics.push({
 					type: "warning",
-					code: "file_info_failed",
-					message: info.error.message,
+					code: "read_failed",
+					message: content.error.message,
 					path: ignorePath,
 				});
+				return [];
 			}
-			continue;
-		}
-		if (info.value.kind !== "file") continue;
-		const content = await env.readTextFile(ignorePath);
-		if (!content.ok) {
-			diagnostics.push({ type: "warning", code: "read_failed", message: content.error.message, path: ignorePath });
-			continue;
-		}
-		const patterns = content.value
-			.split(/\r?\n/)
-			.map((line) => prefixIgnorePattern(line, prefix))
-			.filter((line): line is string => Boolean(line));
+			return content.value
+				.split(/\r?\n/)
+				.map((line) => prefixIgnorePattern(line, prefix))
+				.filter((line): line is string => Boolean(line));
+		}),
+	);
+	for (const patterns of patternGroups) {
 		if (patterns.length > 0) ig.add(patterns);
 	}
 }

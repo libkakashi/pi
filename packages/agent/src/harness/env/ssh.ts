@@ -99,6 +99,17 @@ function toFileError(error: unknown, filePath?: string): FileError {
 	return new FileError("unknown", cause.message, filePath, cause);
 }
 
+function mkdirFailureToFileError(stderr: string, filePath: string, cause: ExecutionError): FileError {
+	const message = stderr.trim() || cause.message;
+	if (/\bPermission denied\b/i.test(message)) {
+		return new FileError("permission_denied", message, filePath, cause);
+	}
+	if (/\bNot a directory\b/i.test(message) || /\bFile exists\b/i.test(message)) {
+		return new FileError("not_directory", message, filePath, cause);
+	}
+	return new FileError("unknown", message, filePath, cause);
+}
+
 function abortFileResult<TValue>(
 	signal: AbortSignal | undefined,
 	filePath?: string,
@@ -564,11 +575,11 @@ export class SshExecutionEnv implements ExecutionEnv {
 		const resolved = resolvePath(this.cwd, filePath);
 		const aborted = abortFileResult<void>(options?.abortSignal, resolved);
 		if (aborted) return aborted;
+		if ((options?.recursive ?? true) === true) {
+			return this.createDirRecursive(resolved, options?.abortSignal);
+		}
 		const sftp = await this.getSftp();
 		if (!sftp.ok) return err(sftp.error);
-		if ((options?.recursive ?? true) === true) {
-			return this.createDirRecursive(sftp.value, resolved, options?.abortSignal);
-		}
 		const result = await sshVoidCallbackResult((callback) => sftp.value.mkdir(resolved, callback));
 		if (!result.ok) return err(toFileError(result.error, resolved));
 		return result;
@@ -644,6 +655,7 @@ export class SshExecutionEnv implements ExecutionEnv {
 		if (this.connectPromise) return this.connectPromise;
 		this.client = new ssh2.Client();
 		const client = this.client;
+
 		this.connectPromise = new Promise((resolve) => {
 			let settled = false;
 			const settle = (result: Result<void, ExecutionError>) => {
@@ -669,8 +681,10 @@ export class SshExecutionEnv implements ExecutionEnv {
 		const connected = await this.ensureConnected();
 		if (!connected.ok) return err(new FileError("unknown", connected.error.message, undefined, connected.error));
 		const client = this.client;
+
 		if (!client) return err(new FileError("unknown", "SSH client is not connected"));
 		if (this.sftpPromise) return this.sftpPromise;
+
 		this.sftpPromise = new Promise((resolve) => {
 			client.sftp((error: Error | undefined, sftp: SFTPWrapper) => {
 				if (error) resolve(err(toFileError(error)));
@@ -681,26 +695,28 @@ export class SshExecutionEnv implements ExecutionEnv {
 	}
 
 	private async createDirRecursive(
-		sftp: SFTPWrapper,
 		resolved: string,
 		abortSignal: AbortSignal | undefined,
 	): Promise<Result<void, FileError>> {
 		if (resolved === "/") return ok(undefined);
-		const parts = resolved.split("/").filter((part) => part.length > 0);
-		let current = resolved.startsWith("/") ? "/" : "";
-		for (const part of parts) {
-			const aborted = abortFileResult<void>(abortSignal, resolved);
-			if (aborted) return aborted;
-			current = current === "/" ? `/${part}` : path.join(current, part);
-			const stats = await this.sftpLstat(sftp, current);
-			if (stats.ok) {
-				if (!stats.value.isDirectory())
-					return err(new FileError("not_directory", `Not a directory: ${current}`, current));
-				continue;
-			}
-			if (stats.error.code !== "not_found") return err(stats.error);
-			const created = await sshVoidCallbackResult((callback) => sftp.mkdir(current, callback));
-			if (!created.ok) return err(toFileError(created.error, current));
+		const result = await this.exec(`mkdir -p -- ${shellQuote(resolved)}`, { abortSignal });
+
+		if (!result.ok) {
+			return err(
+				new FileError(
+					result.error.code === "aborted" ? "aborted" : "unknown",
+					result.error.message,
+					resolved,
+					result.error,
+				),
+			);
+		}
+		if (result.value.exitCode !== 0) {
+			const cause = new ExecutionError(
+				"spawn_error",
+				result.value.stderr || `mkdir exited ${result.value.exitCode}`,
+			);
+			return err(mkdirFailureToFileError(result.value.stderr, resolved, cause));
 		}
 		return ok(undefined);
 	}
