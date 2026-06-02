@@ -12,7 +12,9 @@ const shrinkwrapPath = join(codingAgentDir, "npm-shrinkwrap.json");
 const internalPackagePrefix = "@earendil-works/pi-";
 const allowedInstallScriptPackages = new Map([
 	["@google/genai@1.52.0", "preinstall is a no-op in the published package"],
+	["cpu-features@0.0.10", "optional ssh2 CPU detection native binding; ssh2 catches missing module and falls back"],
 	["protobufjs@7.5.9", "postinstall only warns about protobufjs version scheme mismatches"],
+	["ssh2@1.17.0", "install only attempts optional crypto binding build; package falls back to Node crypto"],
 ]);
 
 const args = new Set(process.argv.slice(2));

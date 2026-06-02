@@ -7,7 +7,11 @@
 
 import { createInterface } from "node:readline";
 import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
+import {
+	type CreateSshExecutionEnvOptions,
+	NodeExecutionEnv,
+	SshExecutionEnv,
+} from "@earendil-works/pi-agent-core/env";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
@@ -121,11 +125,55 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 	return appMode === "json" ? "json" : "text";
 }
 
-async function createExecutionEnv(localCwd: string): Promise<ResolvedExecutionEnv> {
+function parseSshTarget(target: string): CreateSshExecutionEnvOptions {
+	const pathSeparator = target.indexOf(":/");
+	const remote = pathSeparator === -1 ? target : target.slice(0, pathSeparator);
+	const cwd = pathSeparator === -1 ? undefined : target.slice(pathSeparator + 1);
+	const atIndex = remote.lastIndexOf("@");
+	const username = atIndex === -1 ? undefined : remote.slice(0, atIndex);
+	const host = atIndex === -1 ? remote : remote.slice(atIndex + 1);
+	if (!host) {
+		throw new Error("--ssh requires a host, for example user@host or user@host:/path");
+	}
 	return {
-		cwd: localCwd,
-		env: new NodeExecutionEnv({ cwd: localCwd }),
-		diagnostics: [],
+		connection: {
+			host,
+			username,
+			agent: process.env.SSH_AUTH_SOCK,
+		},
+		cwd,
+	};
+}
+
+async function createExecutionEnv(parsed: Args, localCwd: string): Promise<ResolvedExecutionEnv> {
+	if (!parsed.ssh) {
+		return {
+			cwd: localCwd,
+			env: new NodeExecutionEnv({ cwd: localCwd }),
+			diagnostics: [],
+		};
+	}
+
+	const options = parseSshTarget(parsed.ssh);
+	const result = await SshExecutionEnv.create(options);
+	if (!result.ok) {
+		return {
+			cwd: localCwd,
+			env: new NodeExecutionEnv({ cwd: localCwd }),
+			diagnostics: [
+				{ type: "error", message: `Failed to connect SSH target "${parsed.ssh}": ${result.error.message}` },
+			],
+		};
+	}
+	return {
+		cwd: result.value.cwd,
+		env: result.value,
+		diagnostics: [
+			{
+				type: "info",
+				message: `SSH execution env: ${parsed.ssh}:${result.value.cwd}`,
+			},
+		],
 	};
 }
 
@@ -568,7 +616,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const agentDir = getAgentDir();
 	const startupSettingsManager = SettingsManager.create(localCwd, agentDir);
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
-	const resolvedExecutionEnv = await createExecutionEnv(localCwd);
+	const resolvedExecutionEnv = await createExecutionEnv(parsed, localCwd);
 	reportDiagnostics(resolvedExecutionEnv.diagnostics);
 	if (resolvedExecutionEnv.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
 		process.exit(1);
