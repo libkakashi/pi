@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { ExecutionEnv } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/env";
@@ -511,7 +510,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		for (const p of this.additionalExtensionPaths) {
 			if (isLocalPath(p)) {
 				const resolved = this.resolveResourcePath(p);
-				if (!existsSync(resolved)) {
+				const exists = await this.executionEnv.exists(resolved);
+				if (!exists.ok || !exists.value) {
 					extensionsResult.errors.push({ path: resolved, error: `Extension path does not exist: ${resolved}` });
 				}
 			}

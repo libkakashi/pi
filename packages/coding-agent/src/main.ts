@@ -105,6 +105,7 @@ type AppMode = "interactive" | "print" | "json" | "rpc";
 interface ResolvedExecutionEnv {
 	cwd: string;
 	env: ExecutionEnv;
+	sshOptions?: CreateSshExecutionEnvOptions;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
 
@@ -168,6 +169,7 @@ async function createExecutionEnv(parsed: Args, localCwd: string): Promise<Resol
 	return {
 		cwd: result.value.cwd,
 		env: result.value,
+		sshOptions: options,
 		diagnostics: [
 			{
 				type: "info",
@@ -175,6 +177,20 @@ async function createExecutionEnv(parsed: Args, localCwd: string): Promise<Resol
 			},
 		],
 	};
+}
+
+async function createRuntimeExecutionEnv(
+	resolvedExecutionEnv: ResolvedExecutionEnv,
+	cwd: string,
+): Promise<ExecutionEnv | undefined> {
+	if (!resolvedExecutionEnv.sshOptions) {
+		return undefined;
+	}
+	const result = await SshExecutionEnv.create({ ...resolvedExecutionEnv.sshOptions, cwd });
+	if (!result.ok) {
+		throw new Error(`Failed to connect SSH target at ${cwd}: ${result.error.message}`);
+	}
+	return result.value;
 }
 
 async function prepareInitialMessage(
@@ -668,11 +684,12 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager,
 		sessionStartEvent,
 	}) => {
+		const executionEnv = await createRuntimeExecutionEnv(resolvedExecutionEnv, cwd);
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
 			authStorage,
-			executionEnv: resolvedExecutionEnv.env,
+			executionEnv,
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
