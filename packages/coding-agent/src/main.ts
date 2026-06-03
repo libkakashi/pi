@@ -416,6 +416,14 @@ async function createSessionManager(
 	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
 }
 
+async function rejectExistingForkTargetSessionId(parsed: Args, sessionDir?: string): Promise<void> {
+	if (!parsed.fork || !parsed.sessionId) return;
+	if (!sessionDir || !SessionManager.hasSessionId(sessionDir, parsed.sessionId)) return;
+
+	console.error(chalk.red(`Session already exists with id '${parsed.sessionId}'`));
+	process.exit(1);
+}
+
 function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
@@ -619,6 +627,17 @@ export async function main(args: string[], options?: MainOptions) {
 	validateForkFlags(parsed);
 	validateSessionIdFlags(parsed);
 
+	const localCwd = process.cwd();
+	const agentDir = getAgentDir();
+	const startupSettingsManager = SettingsManager.create(localCwd, agentDir);
+	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
+	const envSessionDir = process.env[ENV_SESSION_DIR];
+	const sessionDir =
+		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
+		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
+		startupSettingsManager.getSessionDir();
+	await rejectExistingForkTargetSessionId(parsed, sessionDir);
+
 	const stdinContentPromise =
 		appMode !== "rpc" && !parsed.help && parsed.listModels === undefined
 			? readPipedStdin()
@@ -628,10 +647,6 @@ export async function main(args: string[], options?: MainOptions) {
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
 	time("runMigrations");
 
-	const localCwd = process.cwd();
-	const agentDir = getAgentDir();
-	const startupSettingsManager = SettingsManager.create(localCwd, agentDir);
-	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 	const resolvedExecutionEnv = await createExecutionEnv(parsed, localCwd);
 	reportDiagnostics(resolvedExecutionEnv.diagnostics);
 	if (resolvedExecutionEnv.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
@@ -644,11 +659,6 @@ export async function main(args: string[], options?: MainOptions) {
 	// settings, resources, provider registrations, and models must be resolved only after
 	// the target session cwd is known. The startup-cwd settings manager is used only for
 	// sessionDir lookup during session selection.
-	const envSessionDir = process.env[ENV_SESSION_DIR];
-	const sessionDir =
-		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
-		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
-		startupSettingsManager.getSessionDir();
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = await getMissingSessionCwdIssue(sessionManager, cwd, resolvedExecutionEnv.env);
 	if (missingSessionCwdIssue) {

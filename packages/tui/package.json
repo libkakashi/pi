@@ -37,7 +37,7 @@
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {
-		"@earendil-works/pi-agent-core": "^0.75.5",
+		"@earendil-works/pi-agent-core": "^0.78.0",
 		"get-east-asian-width": "1.6.0",
 		"marked": "15.0.12"
 	},

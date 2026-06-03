@@ -525,6 +525,23 @@ function readSessionHeader(filePath: string): SessionHeader | null {
 	}
 }
 
+function sessionDirHasId(sessionDir: string, id: string, cwd?: string): boolean {
+	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
+	try {
+		for (const file of readdirSync(sessionDir)) {
+			if (!file.endsWith(".jsonl")) continue;
+			const header = readSessionHeader(join(sessionDir, file));
+			if (!header || header.id !== id) continue;
+			if (!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) {
+				return true;
+			}
+		}
+	} catch {
+		return false;
+	}
+	return false;
+}
+
 function getSessionHeaderCwd(header: SessionHeader): string | undefined {
 	const cwd = (header as { cwd?: unknown }).cwd;
 	return typeof cwd === "string" ? cwd : undefined;
@@ -1457,6 +1474,9 @@ export class SessionManager {
 		// Create new session file with new ID but forked content
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
+			if (SessionManager.hasSessionId(dir, options.id)) {
+				throw new Error(`Session already exists with id '${options.id}'`);
+			}
 		}
 		const newSessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
@@ -1499,6 +1519,10 @@ export class SessionManager {
 		);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
+	}
+
+	static hasSessionId(sessionDir: string, id: string, cwd?: string): boolean {
+		return sessionDirHasId(normalizePath(sessionDir), id, cwd);
 	}
 
 	/**
